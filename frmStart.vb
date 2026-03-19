@@ -11,6 +11,11 @@ Public Class frmStart
     Private imgList As ImageList
     Private txtSearch As TextBox
     Private flowTiles As FlowLayoutPanel
+    Private flowRight As FlowLayoutPanel
+    Private chkRightTiles As CheckBox
+    Private rightAsTiles As Boolean = False
+    Private leftPanel As Panel
+    Private rightPanel As Panel
     Private allEntries As New List(Of AppEntry)()
 
     Private Class AppEntry
@@ -38,6 +43,15 @@ Public Class frmStart
         mainPanel.Dock = DockStyle.Fill
         Me.Controls.Add(mainPanel)
 
+        ' Left navigation panel + right content panel layout
+        leftPanel = New Panel()
+        leftPanel.Dock = DockStyle.Left
+        leftPanel.Width = 220
+        leftPanel.Padding = New Padding(8)
+
+        rightPanel = New Panel()
+        rightPanel.Dock = DockStyle.Fill
+
         imgList = New ImageList()
         imgList.ImageSize = New Size(32, 32)
 
@@ -51,13 +65,41 @@ Public Class frmStart
         lstApps.ShowGroups = True
 
         flowTiles = New FlowLayoutPanel()
-        flowTiles.Dock = DockStyle.Fill
+        flowTiles.Dock = DockStyle.Top
+        flowTiles.Height = 260
         flowTiles.FlowDirection = FlowDirection.LeftToRight
         flowTiles.WrapContents = True
         flowTiles.Padding = New Padding(8)
 
-        mainPanel.Controls.Add(flowTiles)
-        mainPanel.Controls.Add(lstApps)
+        ' Right side panel for quick icons or tiles
+        flowRight = New FlowLayoutPanel()
+        flowRight.Dock = DockStyle.Right
+        flowRight.Width = 200
+        flowRight.FlowDirection = FlowDirection.TopDown
+        flowRight.WrapContents = True
+        flowRight.Padding = New Padding(6)
+        flowRight.AutoScroll = True
+        flowRight.BorderStyle = BorderStyle.FixedSingle
+
+        chkRightTiles = New CheckBox()
+        chkRightTiles.Text = "Right side tiles"
+        chkRightTiles.Dock = DockStyle.Top
+        chkRightTiles.AutoSize = True
+        chkRightTiles.Padding = New Padding(4)
+        chkRightTiles.Checked = rightAsTiles
+        AddHandler chkRightTiles.CheckedChanged, AddressOf OnRightTilesToggled
+
+        ' Build left navigation and right content
+        leftPanel.Controls.Add(flowRight)
+        flowRight.Controls.Add(chkRightTiles)
+        leftPanel.Controls.Add(txtSearch)
+
+        rightPanel.Controls.Add(flowTiles)
+        lstApps.Dock = DockStyle.Fill
+        rightPanel.Controls.Add(lstApps)
+
+        mainPanel.Controls.Add(rightPanel)
+        mainPanel.Controls.Add(leftPanel)
 
         LoadStartMenuApps()
         LoadPinnedTiles()
@@ -86,6 +128,38 @@ Public Class frmStart
     Private Shared Function SHCreateItemFromParsingName(pszPath As String, pbc As IntPtr, ByRef riid As Guid, ByRef ppv As IntPtr) As Integer
     End Function
 
+    Private Sub MakeBlackTransparent(bmp As Bitmap)
+        If bmp.PixelFormat <> PixelFormat.Format32bppPArgb AndAlso bmp.PixelFormat <> PixelFormat.Format32bppArgb Then
+            ' ensure 32bpp
+            Dim copy = New Bitmap(bmp.Width, bmp.Height, PixelFormat.Format32bppPArgb)
+            Using g = Graphics.FromImage(copy)
+                g.DrawImage(bmp, New Rectangle(0, 0, copy.Width, copy.Height))
+            End Using
+            bmp.Dispose()
+            bmp = copy
+        End If
+
+        Dim rect = New Rectangle(0, 0, bmp.Width, bmp.Height)
+        Dim data = bmp.LockBits(rect, Imaging.ImageLockMode.ReadWrite, bmp.PixelFormat)
+        Try
+            Dim bytes = Math.Abs(data.Stride) * bmp.Height
+            Dim buffer(bytes - 1) As Byte
+            Marshal.Copy(data.Scan0, buffer, 0, buffer.Length)
+            For i = 0 To buffer.Length - 4 Step 4
+                Dim b = buffer(i)
+                Dim g = buffer(i + 1)
+                Dim r = buffer(i + 2)
+                ' if pixel is pure black (0,0,0) make it transparent
+                If b = 0 AndAlso g = 0 AndAlso r = 0 Then
+                    buffer(i + 3) = 0 ' alpha
+                End If
+            Next
+            Marshal.Copy(buffer, 0, data.Scan0, buffer.Length)
+        Finally
+            bmp.UnlockBits(data)
+        End Try
+    End Sub
+
     <DllImport("gdi32.dll")>
     Private Shared Function DeleteObject(hObject As IntPtr) As <MarshalAs(UnmanagedType.Bool)> Boolean
     End Function
@@ -113,6 +187,10 @@ Public Class frmStart
                     Using g = Graphics.FromImage(copy)
                         g.DrawImage(bmp, New Rectangle(0, 0, copy.Width, copy.Height))
                     End Using
+                    Try
+                        MakeBlackTransparent(copy)
+                    Catch
+                    End Try
                     Return copy
                 Finally
                     If bmp IsNot Nothing Then bmp.Dispose()
@@ -373,8 +451,128 @@ Public Class frmStart
                     End Try
                 Next
             End If
+            ' Also populate right-side quick area
+            PopulateRightSide(shortcuts)
+
+            ' Quick fix: hide center tiles area when empty
+            Try
+                flowTiles.Visible = (flowTiles.Controls.Count > 0)
+                If rightPanel IsNot Nothing Then rightPanel.Refresh()
+            Catch
+            End Try
         Catch
         End Try
+    End Sub
+
+    Private Sub PopulateRightSide(shortcuts As List(Of String))
+        Try
+            flowRight.SuspendLayout()
+            ' Remove any existing buttons except the toggle
+            For i = flowRight.Controls.Count - 1 To 0 Step -1
+                Dim c = flowRight.Controls(i)
+                If c Is chkRightTiles Then Continue For
+                flowRight.Controls.RemoveAt(i)
+                c.Dispose()
+            Next
+
+            If rightAsTiles Then
+                ' larger tiles vertically stacked
+                If shortcuts IsNot Nothing AndAlso shortcuts.Count > 0 Then
+                    For Each s In shortcuts.Distinct().Take(6)
+                        Try
+                            Dim key = ResolveShortcutKey(s)
+                            Dim entry = allEntries.FirstOrDefault(Function(a) String.Equals(a.Key, key, StringComparison.OrdinalIgnoreCase))
+                            If entry Is Nothing Then
+                                entry = New AppEntry() With {.Name = Path.GetFileNameWithoutExtension(s), .Key = key, .ShortcutPath = s, .Group = "Pinned"}
+                            End If
+                            Dim btn = New Button()
+                            Dim targetW = Math.Max(72, flowRight.ClientSize.Width - 12)
+                            btn.Width = targetW
+                            btn.Height = 64
+                            btn.Text = entry.Name
+                            btn.TextAlign = ContentAlignment.MiddleLeft
+                            btn.ImageAlign = ContentAlignment.MiddleLeft
+                            btn.FlatStyle = FlatStyle.Flat
+                            btn.FlatAppearance.BorderSize = 0
+                            btn.Margin = New Padding(4)
+                            btn.BackColor = Color.Transparent
+                            If imgList.Images.ContainsKey(entry.Key) Then btn.Image = imgList.Images(entry.Key)
+                            AddHandler btn.Click, Sub(sa, ea)
+                                                      Try
+                                                          If Not String.IsNullOrEmpty(entry.ShortcutPath) Then Process.Start(New ProcessStartInfo(entry.ShortcutPath) With {.UseShellExecute = True})
+                                                      Catch
+                                                      End Try
+                                                  End Sub
+                            ' insert after the toggle checkbox
+                            flowRight.Controls.Add(btn)
+                        Catch
+                        End Try
+                    Next
+                Else
+                    For Each e In allEntries.Take(6)
+                        AddRightIcon(e)
+                    Next
+                End If
+            Else
+                ' icons: create small square buttons
+                If shortcuts IsNot Nothing AndAlso shortcuts.Count > 0 Then
+                    For Each s In shortcuts.Distinct().Take(16)
+                        Try
+                            Dim key = ResolveShortcutKey(s)
+                            Dim entry = allEntries.FirstOrDefault(Function(a) String.Equals(a.Key, key, StringComparison.OrdinalIgnoreCase))
+                            If entry Is Nothing Then
+                                entry = New AppEntry() With {.Name = Path.GetFileNameWithoutExtension(s), .Key = key, .ShortcutPath = s, .Group = "Pinned"}
+                            End If
+                            AddRightIcon(entry)
+                        Catch
+                        End Try
+                    Next
+                Else
+                    For Each e In allEntries.Take(8)
+                        AddRightIcon(e)
+                    Next
+                End If
+            End If
+        Finally
+            flowRight.ResumeLayout()
+        End Try
+    End Sub
+
+    Private Sub AddRightIcon(entry As AppEntry)
+        Try
+            Dim btn = New Button()
+            btn.Width = 36
+            btn.Height = 36
+            btn.Margin = New Padding(4)
+            btn.FlatStyle = FlatStyle.Flat
+            btn.FlatAppearance.BorderSize = 0
+            btn.Text = String.Empty
+            btn.BackColor = Color.Transparent
+            If imgList.Images.ContainsKey(entry.Key) Then
+                btn.BackgroundImage = imgList.Images(entry.Key)
+                btn.BackgroundImageLayout = ImageLayout.Zoom
+            Else
+                btn.Text = entry.Name.Substring(0, Math.Min(3, entry.Name.Length))
+            End If
+            AddHandler btn.Click, Sub(sa, ea)
+                                      Try
+                                          If Not String.IsNullOrEmpty(entry.ShortcutPath) Then Process.Start(New ProcessStartInfo(entry.ShortcutPath) With {.UseShellExecute = True})
+                                      Catch
+                                      End Try
+                                  End Sub
+            flowRight.Controls.Add(btn)
+        Catch
+        End Try
+    End Sub
+
+    Private Sub OnRightTilesToggled(sender As Object, e As EventArgs)
+        rightAsTiles = chkRightTiles.Checked
+        ' refresh right side using previously discovered pinned shortcuts if available
+        Dim appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData)
+        Dim taskband = IO.Path.Combine(appData, "Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar")
+        Dim shortcuts As New List(Of String)
+        If IO.Directory.Exists(taskband) Then shortcuts.AddRange(IO.Directory.GetFiles(taskband, "*.lnk"))
+        PopulateRightSide(shortcuts)
     End Sub
 
     Private Sub AddTile(entry As AppEntry)
@@ -426,6 +624,10 @@ Public Class frmStart
         End Try
         Return shortcutPath
     End Function
+
+    Private Sub InitializeComponent()
+
+    End Sub
 
     Private Sub OnAppActivated(sender As Object, e As EventArgs)
         If lstApps.SelectedItems.Count = 0 Then Return
