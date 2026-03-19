@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dotnet build:*)",
+      "Bash(powershell -NoProfile -Command \"Add-Type -TypeDefinition ''using System; using System.Runtime.InteropServices; public class W { [DllImport\\(\"\"user32.dll\"\", SetLastError=true, CharSet=CharSet.Auto\\)] public static extern IntPtr FindWindow\\(string c, string w\\); [DllImport\\(\"\"user32.dll\"\", SetLastError=true, CharSet=CharSet.Auto\\)] public static extern IntPtr FindWindowEx\\(IntPtr p, IntPtr a, string c, string w\\); }''; $t=[W]::FindWindow\\(''Shell_TrayWnd'',$null\\); Write-Host ''Shell_TrayWnd:'' $t; $n=[W]::FindWindowEx\\($t,[IntPtr]::Zero,''TrayNotifyWnd'',$null\\); Write-Host ''TrayNotifyWnd:'' $n; $s=[W]::FindWindowEx\\($n,[IntPtr]::Zero,''SysPager'',$null\\); Write-Host ''SysPager:'' $s; $tb=[W]::FindWindowEx\\($s,[IntPtr]::Zero,''ToolbarWindow32'',$null\\); Write-Host ''ToolbarWindow32:'' $tb; $ovf=[W]::FindWindow\\(''NotifyIconOverflowWindow'',$null\\); Write-Host ''OverflowWindow:'' $ovf; $ovftb=[W]::FindWindowEx\\($ovf,[IntPtr]::Zero,''ToolbarWindow32'',$null\\); Write-Host ''OverflowToolbar:'' $ovftb\")",
+      "Bash(powershell -NoProfile -Command '$shell = New-Object -ComObject WScript.Shell; $roots = @\\([Environment]::GetFolderPath\\(\"\"CommonStartMenu\"\"\\), [Environment]::GetFolderPath\\(\"\"StartMenu\"\"\\)\\); foreach \\($root in $roots\\) { Get-ChildItem -Path $root -Filter \"\"*.lnk\"\" -Recurse -ErrorAction SilentlyContinue | ForEach-Object { $lnk = $shell.CreateShortcut\\($_.FullName\\); if \\([string]::IsNullOrEmpty\\($lnk.TargetPath\\)\\) { Write-Host \"\"EMPTY TARGET: $\\($_.Name\\)\"\" } } }')",
+      "Bash(powershell -NoProfile -Command '$shell = New-Object -ComObject WScript.Shell; $roots = @\\([Environment]::GetFolderPath\\(\"\"CommonStartMenu\"\"\\), [Environment]::GetFolderPath\\(\"\"StartMenu\"\"\\)\\); foreach \\($root in $roots\\) { Get-ChildItem -Path $root -Filter \"\"*notepad*\"\" -Recurse -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_.FullName } }')"
+    ]
+  }
+}
