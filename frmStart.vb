@@ -1,6 +1,8 @@
 Imports System.IO
 Imports System.Linq
 Imports System.Runtime.InteropServices
+Imports System.Drawing
+Imports System.Drawing.Imaging
 
 Public Class frmStart
     Inherits Form
@@ -62,6 +64,65 @@ Public Class frmStart
 
         AddHandler lstApps.ItemActivate, AddressOf OnAppActivated
     End Sub
+
+    ' Interop for shell image factory to get UWP app icons
+    <StructLayout(LayoutKind.Sequential)>
+    Private Structure SHSIZE
+        Public cx As Integer
+        Public cy As Integer
+        Public Sub New(w As Integer, h As Integer)
+            cx = w
+            cy = h
+        End Sub
+    End Structure
+
+    <ComImport(), Guid("bcc18b79-ba16-442f-80c4-8a59c30c463b"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)>
+    Private Interface IShellItemImageFactory
+        <PreserveSig>
+        Function GetImage(ByVal size As SHSIZE, ByVal flags As UInteger, ByRef phbm As IntPtr) As Integer
+    End Interface
+
+    <DllImport("shell32.dll", CharSet:=CharSet.Unicode, SetLastError:=True)>
+    Private Shared Function SHCreateItemFromParsingName(pszPath As String, pbc As IntPtr, ByRef riid As Guid, ByRef ppv As IntPtr) As Integer
+    End Function
+
+    <DllImport("gdi32.dll")>
+    Private Shared Function DeleteObject(hObject As IntPtr) As <MarshalAs(UnmanagedType.Bool)> Boolean
+    End Function
+
+    Private Function GetShellIconBitmap(parsingName As String, size As Integer) As Bitmap
+        Try
+            Dim iid As New Guid("bcc18b79-ba16-442f-80c4-8a59c30c463b")
+            Dim pUnk As IntPtr = IntPtr.Zero
+            Dim hr = SHCreateItemFromParsingName(parsingName, IntPtr.Zero, iid, pUnk)
+            If hr <> 0 OrElse pUnk = IntPtr.Zero Then Return Nothing
+
+            Dim factory = CType(Marshal.GetObjectForIUnknown(pUnk), IShellItemImageFactory)
+            Marshal.Release(pUnk)
+
+            Dim hbm As IntPtr = IntPtr.Zero
+            Dim s As New SHSIZE(size, size)
+            Const SIIGBF_RESIZETOFIT As UInteger = 0
+            Dim res = factory.GetImage(s, SIIGBF_RESIZETOFIT, hbm)
+            If res = 0 AndAlso hbm <> IntPtr.Zero Then
+                Dim bmp As Bitmap = Nothing
+                Try
+                    bmp = Bitmap.FromHbitmap(hbm)
+                    ' convert to 32bpp to avoid palette issues
+                    Dim copy = New Bitmap(bmp.Width, bmp.Height, PixelFormat.Format32bppPArgb)
+                    Using g = Graphics.FromImage(copy)
+                        g.DrawImage(bmp, New Rectangle(0, 0, copy.Width, copy.Height))
+                    End Using
+                    Return copy
+                Finally
+                    If bmp IsNot Nothing Then bmp.Dispose()
+                    DeleteObject(hbm)
+                End Try
+            End If
+        Catch
+        End Try
+        Return Nothing
+    End Function
 
     Private Sub OnSearchTextChanged(sender As Object, e As EventArgs)
         Dim q = txtSearch.Text.Trim()
@@ -237,8 +298,9 @@ Public Class frmStart
                     Dim ico = Icon.ExtractAssociatedIcon(entry.Key)
                     imgList.Images.Add(entry.Key, ico.ToBitmap())
                 Else
-                    ' For Store apps and shortcuts with non-file keys, try extracting icon from the shortcut itself
+                    ' For Store apps and shortcuts with non-file keys, try a few fallbacks:
                     Dim gotIcon = False
+                    ' 1) Extract icon from the shortcut file itself (if present)
                     If Not String.IsNullOrEmpty(entry.ShortcutPath) AndAlso entry.ShortcutPath.EndsWith(".lnk", StringComparison.OrdinalIgnoreCase) AndAlso File.Exists(entry.ShortcutPath) Then
                         Try
                             Dim ico = Icon.ExtractAssociatedIcon(entry.ShortcutPath)
@@ -249,8 +311,26 @@ Public Class frmStart
                         Catch
                         End Try
                     End If
+                    ' 2) If this is a shell:AppsFolder entry (UWP/Store app), try Shell image factory
                     If Not gotIcon Then
-                        Dim bmp = New Bitmap(32, 32)
+                        Try
+                            Dim parsingName As String = Nothing
+                            If Not String.IsNullOrEmpty(entry.ShortcutPath) AndAlso entry.ShortcutPath.StartsWith("shell:AppsFolder", StringComparison.OrdinalIgnoreCase) Then
+                                parsingName = entry.ShortcutPath
+                            Else
+                                parsingName = "shell:AppsFolder\" & entry.Key
+                            End If
+                            Dim bmpUwp = GetShellIconBitmap(parsingName, imgList.ImageSize.Width)
+                            If bmpUwp IsNot Nothing Then
+                                imgList.Images.Add(entry.Key, bmpUwp)
+                                gotIcon = True
+                            End If
+                        Catch
+                        End Try
+                    End If
+                    ' 3) Final fallback: generic placeholder
+                    If Not gotIcon Then
+                        Dim bmp = New Bitmap(imgList.ImageSize.Width, imgList.ImageSize.Height)
                         Using gr = Graphics.FromImage(bmp)
                             gr.Clear(Color.LightGray)
                         End Using
