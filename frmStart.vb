@@ -229,11 +229,9 @@ Public Class frmStart
     Protected Overrides ReadOnly Property CreateParams As CreateParams
         Get
             Dim cp = MyBase.CreateParams
-            If micaEnabled Then
-                ' Add WS_CAPTION so DWM has a frame to apply Mica/Acrylic to.
-                ' We remove the actual title bar visually via WM_NCCALCSIZE.
-                cp.Style = cp.Style Or WS_CAPTION
-            End If
+            ' Always add WS_CAPTION so DWM can apply Mica when toggled on.
+            ' WM_NCCALCSIZE hides the title bar visually.
+            cp.Style = cp.Style Or WS_CAPTION
             ' Reduce flicker
             cp.ExStyle = cp.ExStyle Or &H2000000 ' WS_EX_COMPOSITED
             Return cp
@@ -241,9 +239,8 @@ Public Class frmStart
     End Property
 
     Protected Overrides Sub WndProc(ByRef m As Message)
-        If micaEnabled AndAlso m.Msg = WM_NCCALCSIZE AndAlso m.WParam <> IntPtr.Zero Then
-            ' Return 0 to remove the non-client area (title bar) while keeping WS_CAPTION
-            ' This is the trick that makes Mica work on a visually borderless window
+        If m.Msg = WM_NCCALCSIZE AndAlso m.WParam <> IntPtr.Zero Then
+            ' Always remove the non-client area (title bar) while keeping WS_CAPTION
             m.Result = IntPtr.Zero
             Return
         End If
@@ -842,11 +839,39 @@ Public Class frmStart
             End Using
         End Using
 
-        ' Mica toggle (small text button)
-        Dim micaText = If(micaApplied, "[Mica: ON]", "[Mica: OFF]")
-        Using fnt = New Font("Segoe UI", 8, FontStyle.Regular)
+        ' Mica toggle switch
+        Dim toggleX = pnlUserBar.Width - 160
+        Dim toggleY = 20
+        Dim trackW = 40
+        Dim trackH = 20
+        Dim knobSize = 16
+        Dim knobPad = 2
+
+        ' Track (pill shape)
+        Dim trackRect = New Rectangle(toggleX, toggleY, trackW, trackH)
+        Dim trackColor = If(micaApplied, clrAccent, Color.FromArgb(120, 80, 80, 80))
+        Using trackPath = New GraphicsPath()
+            Dim r = trackH \ 2
+            trackPath.AddArc(trackRect.X, trackRect.Y, trackH, trackH, 90, 180)
+            trackPath.AddArc(trackRect.Right - trackH, trackRect.Y, trackH, trackH, 270, 180)
+            trackPath.CloseFigure()
+            Using br = New SolidBrush(trackColor)
+                g.FillPath(br, trackPath)
+            End Using
+        End Using
+
+        ' Knob (circle)
+        Dim knobX = If(micaApplied, toggleX + trackW - knobSize - knobPad, toggleX + knobPad)
+        Dim knobY = toggleY + knobPad
+        Using br = New SolidBrush(Color.White)
+            g.FillEllipse(br, knobX, knobY, knobSize, knobSize)
+        End Using
+
+        ' Label
+        Dim lblText = If(micaApplied, "Mica", "Mica")
+        Using fnt = New Font("Segoe UI", 7.5F, FontStyle.Regular)
             Using br = New SolidBrush(clrTextSecondary)
-                g.DrawString(micaText, fnt, br, pnlUserBar.Width - 160, 22)
+                g.DrawString(lblText, fnt, br, toggleX + trackW + 4, toggleY + 2)
             End Using
         End Using
 
@@ -1284,26 +1309,26 @@ Public Class frmStart
         Dim isPinned = pinnedEntries.Any(Function(p) p.Key = entry.Key)
         If isPinned Then
             cm.Items.Add("Unpin from Start", Nothing, Sub(s, ev)
-                                                           pinnedEntries.RemoveAll(Function(p) p.Key = entry.Key)
-                                                           RebuildPinnedHeight()
-                                                           pnlPinned.Invalidate()
-                                                       End Sub)
+                                                          pinnedEntries.RemoveAll(Function(p) p.Key = entry.Key)
+                                                          RebuildPinnedHeight()
+                                                          pnlPinned.Invalidate()
+                                                      End Sub)
         Else
             cm.Items.Add("Pin to Start", Nothing, Sub(s, ev)
-                                                       If pinnedEntries.Count < 18 Then
-                                                           pinnedEntries.Add(entry)
-                                                           RebuildPinnedHeight()
-                                                           pnlPinned.Invalidate()
-                                                       End If
-                                                   End Sub)
+                                                      If pinnedEntries.Count < 18 Then
+                                                          pinnedEntries.Add(entry)
+                                                          RebuildPinnedHeight()
+                                                          pnlPinned.Invalidate()
+                                                      End If
+                                                  End Sub)
         End If
 
         cm.Items.Add("Open", Nothing, Sub(s, ev) LaunchEntry(entry))
         cm.Items.Add("Open file location", Nothing, Sub(s, ev)
-                                                         If Not String.IsNullOrEmpty(entry.ShortcutPath) AndAlso IO.File.Exists(entry.ShortcutPath) Then
-                                                             Process.Start("explorer.exe", "/select,""" & entry.ShortcutPath & """")
-                                                         End If
-                                                     End Sub)
+                                                        If Not String.IsNullOrEmpty(entry.ShortcutPath) AndAlso IO.File.Exists(entry.ShortcutPath) Then
+                                                            Process.Start("explorer.exe", "/select,""" & entry.ShortcutPath & """")
+                                                        End If
+                                                    End Sub)
 
         cm.Show(pnlAllApps, e.Location)
     End Sub
@@ -1317,8 +1342,9 @@ Public Class frmStart
 
     ' --- User bar interaction ---
     Private Sub UserBarClick(sender As Object, e As MouseEventArgs)
-        ' Mica toggle area
-        If e.X > pnlUserBar.Width - 160 AndAlso e.X < pnlUserBar.Width - 60 Then
+        ' Mica toggle switch area (pill + label)
+        Dim toggleX = pnlUserBar.Width - 160
+        If e.X >= toggleX AndAlso e.X <= toggleX + 80 AndAlso e.Y >= 16 AndAlso e.Y <= 44 Then
             ToggleMica()
             Return
         End If
@@ -1328,11 +1354,11 @@ Public Class frmStart
             Dim cm = New ContextMenuStrip()
             cm.Items.Add("Sleep", Nothing, Sub(s, ev) Application.SetSuspendState(PowerState.Suspend, False, False))
             cm.Items.Add("Shut down", Nothing, Sub(s, ev)
-                                                    Try : Process.Start("shutdown", "/s /t 0") : Catch : End Try
-                                                End Sub)
+                                                   Try : Process.Start("shutdown", "/s /t 0") : Catch : End Try
+                                               End Sub)
             cm.Items.Add("Restart", Nothing, Sub(s, ev)
-                                                  Try : Process.Start("shutdown", "/r /t 0") : Catch : End Try
-                                              End Sub)
+                                                 Try : Process.Start("shutdown", "/r /t 0") : Catch : End Try
+                                             End Sub)
             cm.Items.Add("Sign out", Nothing, Sub(s, ev)
                                                   Try : Process.Start("logoff") : Catch : End Try
                                               End Sub)
@@ -1352,11 +1378,20 @@ Public Class frmStart
         If micaEnabled Then
             ApplyMicaBackdrop()
         Else
-            ' Disable Mica — set backdrop to none
+            ' Disable Mica
             micaApplied = False
             Try
-                Dim backdropType As Integer = 1 ' DWMSBT_NONE / Auto
+                ' Remove backdrop
+                Dim backdropType As Integer = 0 ' DWMSBT_NONE
                 DwmSetWindowAttribute(Me.Handle, DWMWA_SYSTEMBACKDROP_TYPE, backdropType, 4)
+
+                ' Also try the legacy attribute
+                Dim micaOff As Integer = 0
+                DwmSetWindowAttribute(Me.Handle, DWMWA_MICA_EFFECT, micaOff, 4)
+
+                ' Retract DWM frame so it stops being see-through
+                Dim m As New MARGINS() With {.Left = 0, .Right = 0, .Top = 0, .Bottom = 0}
+                DwmExtendFrameIntoClientArea(Me.Handle, m)
             Catch
             End Try
         End If
