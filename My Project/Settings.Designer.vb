@@ -37,6 +37,18 @@ Namespace My
 #End If
 #End Region
         
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property PinnedAppKeys() As String
+            Get
+                Return CType(Me("PinnedAppKeys"),String)
+            End Get
+            Set
+                Me("PinnedAppKeys") = value
+            End Set
+        End Property
+
         Public Shared ReadOnly Property [Default]() As MySettings
             Get
                 

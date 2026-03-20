@@ -147,6 +147,8 @@ Public Class frmStart
     Private pinnedHoveredIdx As Integer = -1
     Private catHoveredIdx As Integer = -1
     Private allAppsHoveredIdx As Integer = -1
+    Private showLetterGrid As Boolean = False
+    Private letterGridHoveredIdx As Integer = -1
     Private expandedCategories As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
     Private hoveredCatHeader As String = Nothing
     Private catScrollOffsets As New Dictionary(Of String, Integer)(StringComparer.OrdinalIgnoreCase)
@@ -187,8 +189,11 @@ Public Class frmStart
 
     ' Pinned entries (max ~12)
     Private pinnedEntries As New List(Of AppEntry)()
-    ' Category buckets
+    ' Category buckets (custom categories first, then auto-categories)
     Private categories As New List(Of (Name As String, Entries As List(Of AppEntry)))()
+    ' Custom category names — used to identify which categories are user-created
+    Private customCategoryNames As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+    Private ReadOnly clrCustomCatBorder As Color = Color.FromArgb(80, 96, 165, 250)
 #End Region
 
     Public Sub New()
@@ -206,6 +211,7 @@ Public Class frmStart
         BuildUI()
         LoadStartMenuApps()
         BuildPinned()
+        LoadSavedPins()
         BuildCategories()
     End Sub
 
@@ -275,6 +281,13 @@ Public Class frmStart
 
     Private Sub Form_KeyDown(sender As Object, e As KeyEventArgs)
         If e.KeyCode = Keys.Escape Then
+            If showLetterGrid Then
+                showLetterGrid = False
+                letterGridHoveredIdx = -1
+                pnlAllApps.Invalidate()
+                e.Handled = True
+                Return
+            End If
             Me.Close()
         ElseIf Not txtSearch.Focused Then
             ' Redirect typing to search
@@ -790,6 +803,37 @@ Public Class frmStart
         End If
     End Sub
 
+    Private Sub LoadSavedPins()
+        ' If user has saved pinned apps, replace the defaults with their saved list
+        Try
+            Dim saved = My.Settings.PinnedAppKeys
+            If Not String.IsNullOrEmpty(saved) Then
+                Dim keys = saved.Split("|"c)
+                Dim restored As New List(Of AppEntry)()
+                For Each key In keys
+                    If String.IsNullOrEmpty(key) Then Continue For
+                    Dim entry = allEntries.FirstOrDefault(Function(a) String.Equals(a.Key, key, StringComparison.OrdinalIgnoreCase))
+                    If entry IsNot Nothing Then restored.Add(entry)
+                Next
+                If restored.Count > 0 Then
+                    pinnedEntries.Clear()
+                    pinnedEntries.AddRange(restored)
+                End If
+            End If
+        Catch
+            ' First run or settings unavailable — keep defaults from BuildPinned
+        End Try
+    End Sub
+
+    Private Sub SavePins()
+        Try
+            Dim keys = String.Join("|", pinnedEntries.Select(Function(e) e.Key))
+            My.Settings.PinnedAppKeys = keys
+            My.Settings.Save()
+        Catch
+        End Try
+    End Sub
+
     Private Sub BuildCategories()
         categories.Clear()
         ' Group entries that have a category
@@ -1214,6 +1258,74 @@ Public Class frmStart
         Next
 
         g.ResetClip()
+
+        ' Draw letter grid overlay when active
+        If showLetterGrid Then
+            PaintLetterGrid(g)
+        End If
+    End Sub
+
+    Private Sub PaintLetterGrid(g As Graphics)
+        Dim panelW = pnlAllApps.ClientSize.Width
+        Dim panelH = pnlAllApps.ClientSize.Height
+
+        ' Dim background
+        Using br = New SolidBrush(Color.FromArgb(220, 25, 25, 25))
+            g.FillRectangle(br, 0, 0, panelW, panelH)
+        End Using
+
+        Dim allLetters = {"#", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M",
+                          "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z"}
+        Dim available = GetAvailableLetters()
+
+        Dim cols = 7
+        Dim cellSize = 30
+        Dim cellGap = 4
+        Dim gridW = cols * (cellSize + cellGap) - cellGap
+        Dim gridX = (panelW - gridW) \ 2
+        Dim gridY = 40
+
+        ' Title
+        Using fnt = New Font("Segoe UI", 11, FontStyle.Bold)
+            Using br = New SolidBrush(clrTextPrimary)
+                Using sf = New StringFormat() With {.Alignment = StringAlignment.Center}
+                    g.DrawString("Jump to", fnt, br, New RectangleF(0, 10, panelW, 24), sf)
+                End Using
+            End Using
+        End Using
+
+        Using fnt = New Font("Segoe UI", 11, FontStyle.Bold)
+            Using sf = New StringFormat() With {.Alignment = StringAlignment.Center, .LineAlignment = StringAlignment.Center}
+                For i = 0 To allLetters.Length - 1
+                    Dim col = i Mod cols
+                    Dim row = i \ cols
+                    Dim cx = gridX + col * (cellSize + cellGap)
+                    Dim cy = gridY + row * (cellSize + cellGap)
+                    Dim cellRect = New Rectangle(cx, cy, cellSize, cellSize)
+
+                    Dim hasEntries = available.Contains(allLetters(i))
+                    Dim isHovered = (letterGridHoveredIdx = i)
+
+                    ' Cell background
+                    Dim cellColor As Color
+                    If isHovered AndAlso hasEntries Then
+                        cellColor = clrAccent
+                    ElseIf hasEntries Then
+                        cellColor = clrCardBg
+                    Else
+                        cellColor = Color.FromArgb(40, 40, 40, 40)
+                    End If
+                    DrawRoundedCard(g, cellRect, cellColor, 6)
+
+                    ' Letter text
+                    Dim textColor = If(hasEntries, clrTextPrimary, Color.FromArgb(60, 200, 200, 200))
+                    If isHovered AndAlso hasEntries Then textColor = Color.White
+                    Using br = New SolidBrush(textColor)
+                        g.DrawString(allLetters(i), fnt, br, New RectangleF(cx, cy, cellSize, cellSize), sf)
+                    End Using
+                Next
+            End Using
+        End Using
     End Sub
 
     Private Sub DrawRoundedCard(g As Graphics, rect As Rectangle, fillColor As Color, radius As Integer)
@@ -1471,8 +1583,8 @@ Public Class frmStart
     End Sub
 
     ' --- All Apps mouse handling ---
-    Private Function GetAllAppsEntryAt(pt As Point) As (Index As Integer, Entry As AppEntry)
-        If pt.Y < 34 Then Return (-1, Nothing)
+    Private Function GetAllAppsEntryAt(pt As Point) As (Index As Integer, Entry As AppEntry, LetterHeader As String)
+        If pt.Y < 34 Then Return (-1, Nothing, Nothing)
         Dim query = txtSearch.Text.Trim()
         Dim filtered = allEntries.Where(Function(a) String.IsNullOrEmpty(query) OrElse a.Name.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0).OrderBy(Function(a) a.Name).ToList()
 
@@ -1484,38 +1596,133 @@ Public Class frmStart
             If Not Char.IsLetter(firstLetter(0)) Then firstLetter = "#"
             If firstLetter <> currentLetter Then
                 currentLetter = firstLetter
+                ' Check if click is on the letter header row
+                Dim letterRect = New Rectangle(0, y, pnlAllApps.ClientSize.Width, ALLAPPS_LETTER_H)
+                If letterRect.Contains(pt) Then Return (-1, Nothing, currentLetter)
                 y += ALLAPPS_LETTER_H
             End If
             Dim rowRect = New Rectangle(4, y, pnlAllApps.ClientSize.Width - 8, ALLAPPS_ROW_H)
-            If rowRect.Contains(pt) Then Return (i, entry)
+            If rowRect.Contains(pt) Then Return (i, entry, Nothing)
             y += ALLAPPS_ROW_H
         Next
-        Return (-1, Nothing)
+        Return (-1, Nothing, Nothing)
+    End Function
+
+    Private Function GetAvailableLetters() As HashSet(Of String)
+        Dim result As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+        Dim query = txtSearch.Text.Trim()
+        For Each entry In allEntries
+            If Not String.IsNullOrEmpty(query) AndAlso entry.Name.IndexOf(query, StringComparison.OrdinalIgnoreCase) < 0 Then Continue For
+            Dim fl = entry.Name.Substring(0, 1).ToUpper()
+            If Not Char.IsLetter(fl(0)) Then fl = "#"
+            result.Add(fl)
+        Next
+        Return result
+    End Function
+
+    Private Function GetScrollOffsetForLetter(letter As String) As Integer
+        Dim query = txtSearch.Text.Trim()
+        Dim filtered = allEntries.Where(Function(a) String.IsNullOrEmpty(query) OrElse a.Name.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0).OrderBy(Function(a) a.Name).ToList()
+        Dim y = 0
+        Dim currentLetter As String = ""
+        For Each entry In filtered
+            Dim fl = entry.Name.Substring(0, 1).ToUpper()
+            If Not Char.IsLetter(fl(0)) Then fl = "#"
+            If fl <> currentLetter Then
+                currentLetter = fl
+                If currentLetter = letter Then Return y
+                y += ALLAPPS_LETTER_H
+            End If
+            y += ALLAPPS_ROW_H
+        Next
+        Return 0
     End Function
 
     Private Sub AllAppsClick(sender As Object, e As MouseEventArgs)
         If e.Button <> MouseButtons.Left Then Return
+
+        ' Handle letter grid overlay clicks
+        If showLetterGrid Then
+            Dim gridIdx = GetLetterGridIndexAt(e.Location)
+            If gridIdx >= 0 Then
+                Dim allLetters = {"#", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M",
+                                  "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z"}
+                Dim available = GetAvailableLetters()
+                If gridIdx < allLetters.Length AndAlso available.Contains(allLetters(gridIdx)) Then
+                    allAppsScrollOffset = GetScrollOffsetForLetter(allLetters(gridIdx))
+                End If
+            End If
+            showLetterGrid = False
+            letterGridHoveredIdx = -1
+            pnlAllApps.Invalidate()
+            Return
+        End If
+
+        ' Check if clicking a letter header — show the letter grid
         Dim hit = GetAllAppsEntryAt(e.Location)
+        If hit.LetterHeader IsNot Nothing Then
+            showLetterGrid = True
+            pnlAllApps.Invalidate()
+            Return
+        End If
+
         If hit.Entry IsNot Nothing Then LaunchEntry(hit.Entry)
     End Sub
 
+    Private Function GetLetterGridIndexAt(pt As Point) As Integer
+        ' Grid layout: 7 columns, starts at y=40, each cell 30x30 with 4px gap
+        Dim gridX = (pnlAllApps.ClientSize.Width - (7 * 34)) \ 2
+        Dim gridY = 40
+        Dim cellSize = 30
+        Dim cellGap = 4
+
+        Dim col = (pt.X - gridX) \ (cellSize + cellGap)
+        Dim row = (pt.Y - gridY) \ (cellSize + cellGap)
+        If col < 0 OrElse col >= 7 OrElse row < 0 Then Return -1
+
+        ' Check if actually inside the cell (not in the gap)
+        Dim cellLeft = gridX + col * (cellSize + cellGap)
+        Dim cellTop = gridY + row * (cellSize + cellGap)
+        If pt.X < cellLeft OrElse pt.X > cellLeft + cellSize Then Return -1
+        If pt.Y < cellTop OrElse pt.Y > cellTop + cellSize Then Return -1
+
+        Dim idx = row * 7 + col
+        If idx > 27 Then Return -1 ' # + A-Z = 28 items
+        Return idx
+    End Function
+
     Private Sub AllAppsMouseMove(sender As Object, e As MouseEventArgs)
+        If showLetterGrid Then
+            Dim gridIdx = GetLetterGridIndexAt(e.Location)
+            If gridIdx <> letterGridHoveredIdx Then
+                letterGridHoveredIdx = gridIdx
+                pnlAllApps.Invalidate()
+            End If
+            pnlAllApps.Cursor = If(gridIdx >= 0, Cursors.Hand, Cursors.Default)
+            Return
+        End If
+
         Dim hit = GetAllAppsEntryAt(e.Location)
         If hit.Index <> allAppsHoveredIdx Then
             allAppsHoveredIdx = hit.Index
             pnlAllApps.Invalidate()
         End If
-        pnlAllApps.Cursor = If(hit.Index >= 0, Cursors.Hand, Cursors.Default)
+        Dim showHand = hit.Index >= 0 OrElse hit.LetterHeader IsNot Nothing
+        pnlAllApps.Cursor = If(showHand, Cursors.Hand, Cursors.Default)
     End Sub
 
     Private Sub AllAppsMouseLeave(sender As Object, e As EventArgs)
-        If allAppsHoveredIdx >= 0 Then
-            allAppsHoveredIdx = -1
-            pnlAllApps.Invalidate()
-        End If
+        Dim needRepaint = (allAppsHoveredIdx >= 0 OrElse letterGridHoveredIdx >= 0)
+        allAppsHoveredIdx = -1
+        letterGridHoveredIdx = -1
+        If needRepaint Then pnlAllApps.Invalidate()
     End Sub
 
     Private Sub AllAppsWheel(sender As Object, e As MouseEventArgs)
+        If showLetterGrid Then
+            showLetterGrid = False
+            letterGridHoveredIdx = -1
+        End If
         allAppsScrollOffset -= e.Delta \ 4
         allAppsScrollOffset = Math.Max(0, allAppsScrollOffset)
         ' Clamp to content height
@@ -1556,6 +1763,7 @@ Public Class frmStart
         If isPinned Then
             cm.Items.Add("Unpin from Start", Nothing, Sub(s, ev)
                                                           pinnedEntries.RemoveAll(Function(p) p.Key = entry.Key)
+                                                          SavePins()
                                                           RebuildPinnedHeight()
                                                           pnlPinned.Invalidate()
                                                       End Sub)
@@ -1563,6 +1771,7 @@ Public Class frmStart
             cm.Items.Add("Pin to Start", Nothing, Sub(s, ev)
                                                       If pinnedEntries.Count < 18 Then
                                                           pinnedEntries.Add(entry)
+                                                          SavePins()
                                                           RebuildPinnedHeight()
                                                           pnlPinned.Invalidate()
                                                       End If
