@@ -2,112 +2,54 @@ Imports System.IO
 Imports System.Linq
 Imports System.Runtime.InteropServices
 Imports System.Drawing
+Imports System.Drawing.Drawing2D
 Imports System.Drawing.Imaging
+Imports System.Drawing.Text
 
 Public Class frmStart
     Inherits Form
 
-    Private lstApps As ListView
-    Private imgList As ImageList
-    Private txtSearch As TextBox
-    Private flowTiles As FlowLayoutPanel
-    Private flowRight As FlowLayoutPanel
-    Private chkRightTiles As CheckBox
-    Private rightAsTiles As Boolean = False
-    Private leftPanel As Panel
-    Private rightPanel As Panel
-    Private allEntries As New List(Of AppEntry)()
+#Region "P/Invoke - Mica / Acrylic / DWM"
+    <DllImport("dwmapi.dll", PreserveSig:=True)>
+    Private Shared Function DwmSetWindowAttribute(hwnd As IntPtr, attr As Integer, ByRef attrValue As Integer, attrSize As Integer) As Integer
+    End Function
 
-    Private Class AppEntry
-        Public Property Name As String
-        Public Property Key As String
-        Public Property ShortcutPath As String
-        Public Property Group As String
-    End Class
+    <DllImport("dwmapi.dll", PreserveSig:=True)>
+    Private Shared Function DwmExtendFrameIntoClientArea(hwnd As IntPtr, ByRef margins As MARGINS) As Integer
+    End Function
 
-    Public Sub New()
-        Me.FormBorderStyle = FormBorderStyle.FixedSingle
-        Me.Width = 800
-        Me.Height = 700
-        Me.Text = "Start"
-        Me.BackColor = Color.White
+    <DllImport("user32.dll")>
+    Private Shared Function SetWindowPos(hWnd As IntPtr, hWndInsertAfter As IntPtr, X As Integer, Y As Integer, cx As Integer, cy As Integer, uFlags As UInteger) As Boolean
+    End Function
 
-        txtSearch = New TextBox()
-        txtSearch.Dock = DockStyle.Top
-        txtSearch.Height = 32
-        txtSearch.PlaceholderText = "Search apps..."
-        AddHandler txtSearch.TextChanged, AddressOf OnSearchTextChanged
-        Me.Controls.Add(txtSearch)
+    <StructLayout(LayoutKind.Sequential)>
+    Private Structure MARGINS
+        Public Left As Integer
+        Public Right As Integer
+        Public Top As Integer
+        Public Bottom As Integer
+    End Structure
 
-        Dim mainPanel As New Panel()
-        mainPanel.Dock = DockStyle.Fill
-        Me.Controls.Add(mainPanel)
+    Private Const DWMWA_USE_IMMERSIVE_DARK_MODE As Integer = 20
+    Private Const DWMWA_SYSTEMBACKDROP_TYPE As Integer = 38
+    Private Const DWMWA_MICA_EFFECT As Integer = 1029
 
-        ' Left navigation panel + right content panel layout
-        leftPanel = New Panel()
-        leftPanel.Dock = DockStyle.Left
-        leftPanel.Width = 220
-        leftPanel.Padding = New Padding(8)
+    ' Backdrop types for DWMWA_SYSTEMBACKDROP_TYPE (Win11 22H2+)
+    Private Const DWMSBT_MAINWINDOW As Integer = 2   ' Mica
+    Private Const DWMSBT_TABBEDWINDOW As Integer = 4 ' Mica Alt
+    Private Const DWMSBT_TRANSIENTWINDOW As Integer = 3 ' Acrylic
 
-        rightPanel = New Panel()
-        rightPanel.Dock = DockStyle.Fill
+    ' Window style constants for Mica on borderless
+    Private Const WS_CAPTION As Integer = &HC00000
+    Private Const WS_THICKFRAME As Integer = &H40000
+    Private Const WM_NCCALCSIZE As Integer = &H83
+    Private Const WM_NCHITTEST As Integer = &H84
 
-        imgList = New ImageList()
-        imgList.ImageSize = New Size(32, 32)
+    Private micaApplied As Boolean = False
+    Private micaEnabled As Boolean = False  ' Off by default — user can toggle
+#End Region
 
-        lstApps = New ListView()
-        lstApps.Dock = DockStyle.Left
-        lstApps.Width = 420
-        lstApps.View = View.Tile
-        lstApps.TileSize = New Size(380, 40)
-        lstApps.LargeImageList = imgList
-        lstApps.MultiSelect = False
-        lstApps.ShowGroups = True
-
-        flowTiles = New FlowLayoutPanel()
-        flowTiles.Dock = DockStyle.Top
-        flowTiles.Height = 260
-        flowTiles.FlowDirection = FlowDirection.LeftToRight
-        flowTiles.WrapContents = True
-        flowTiles.Padding = New Padding(8)
-
-        ' Right side panel for quick icons or tiles
-        flowRight = New FlowLayoutPanel()
-        flowRight.Dock = DockStyle.Right
-        flowRight.Width = 200
-        flowRight.FlowDirection = FlowDirection.TopDown
-        flowRight.WrapContents = True
-        flowRight.Padding = New Padding(6)
-        flowRight.AutoScroll = True
-        flowRight.BorderStyle = BorderStyle.FixedSingle
-
-        chkRightTiles = New CheckBox()
-        chkRightTiles.Text = "Right side tiles"
-        chkRightTiles.Dock = DockStyle.Top
-        chkRightTiles.AutoSize = True
-        chkRightTiles.Padding = New Padding(4)
-        chkRightTiles.Checked = rightAsTiles
-        AddHandler chkRightTiles.CheckedChanged, AddressOf OnRightTilesToggled
-
-        ' Build left navigation and right content
-        leftPanel.Controls.Add(flowRight)
-        flowRight.Controls.Add(chkRightTiles)
-        leftPanel.Controls.Add(txtSearch)
-
-        rightPanel.Controls.Add(flowTiles)
-        lstApps.Dock = DockStyle.Fill
-        rightPanel.Controls.Add(lstApps)
-
-        mainPanel.Controls.Add(rightPanel)
-        mainPanel.Controls.Add(leftPanel)
-
-        LoadStartMenuApps()
-        LoadPinnedTiles()
-
-        AddHandler lstApps.ItemActivate, AddressOf OnAppActivated
-    End Sub
-
-    ' Interop for shell image factory to get UWP app icons
+#Region "P/Invoke - Shell icon extraction"
     <StructLayout(LayoutKind.Sequential)>
     Private Structure SHSIZE
         Public cx As Integer
@@ -128,117 +70,264 @@ Public Class frmStart
     Private Shared Function SHCreateItemFromParsingName(pszPath As String, pbc As IntPtr, ByRef riid As Guid, ByRef ppv As IntPtr) As Integer
     End Function
 
-    Private Sub MakeBlackTransparent(bmp As Bitmap)
-        If bmp.PixelFormat <> PixelFormat.Format32bppPArgb AndAlso bmp.PixelFormat <> PixelFormat.Format32bppArgb Then
-            ' ensure 32bpp
-            Dim copy = New Bitmap(bmp.Width, bmp.Height, PixelFormat.Format32bppPArgb)
-            Using g = Graphics.FromImage(copy)
-                g.DrawImage(bmp, New Rectangle(0, 0, copy.Width, copy.Height))
-            End Using
-            bmp.Dispose()
-            bmp = copy
-        End If
-
-        Dim rect = New Rectangle(0, 0, bmp.Width, bmp.Height)
-        Dim data = bmp.LockBits(rect, Imaging.ImageLockMode.ReadWrite, bmp.PixelFormat)
-        Try
-            Dim bytes = Math.Abs(data.Stride) * bmp.Height
-            Dim buffer(bytes - 1) As Byte
-            Marshal.Copy(data.Scan0, buffer, 0, buffer.Length)
-            For i = 0 To buffer.Length - 4 Step 4
-                Dim b = buffer(i)
-                Dim g = buffer(i + 1)
-                Dim r = buffer(i + 2)
-                ' if pixel is pure black (0,0,0) make it transparent
-                If b = 0 AndAlso g = 0 AndAlso r = 0 Then
-                    buffer(i + 3) = 0 ' alpha
-                End If
-            Next
-            Marshal.Copy(buffer, 0, data.Scan0, buffer.Length)
-        Finally
-            bmp.UnlockBits(data)
-        End Try
-    End Sub
-
     <DllImport("gdi32.dll")>
     Private Shared Function DeleteObject(hObject As IntPtr) As <MarshalAs(UnmanagedType.Bool)> Boolean
     End Function
+#End Region
 
-    Private Function GetShellIconBitmap(parsingName As String, size As Integer) As Bitmap
+#Region "Data model"
+    Private Class AppEntry
+        Public Property Name As String
+        Public Property Key As String
+        Public Property ShortcutPath As String
+        Public Property Group As String
+        Public Property Category As String = ""
+    End Class
+
+    Private allEntries As New List(Of AppEntry)()
+    Private imgDict As New Dictionary(Of String, Bitmap)(StringComparer.OrdinalIgnoreCase)
+    Private Const ICON_SIZE As Integer = 32
+    Private Const LARGE_ICON_SIZE As Integer = 40
+#End Region
+
+#Region "UI Controls"
+    Private txtSearch As TextBox
+    Private pnlPinned As Panel
+    Private pnlCategories As Panel
+    Private pnlAllApps As Panel
+    Private pnlUserBar As Panel
+    Private scrollAllApps As VScrollBar
+    Private allAppsScrollOffset As Integer = 0
+    Private hoveredCard As Rectangle = Rectangle.Empty
+    Private hoveredCardEntry As AppEntry = Nothing
+    Private pinnedHoveredIdx As Integer = -1
+    Private catHoveredIdx As Integer = -1
+    Private allAppsHoveredIdx As Integer = -1
+
+    ' Layout constants
+    Private Const FORM_WIDTH As Integer = 860
+    Private Const FORM_HEIGHT As Integer = 640
+    Private Const CARD_W As Integer = 88
+    Private Const CARD_H As Integer = 88
+    Private Const CARD_GAP As Integer = 8
+    Private Const SECTION_PAD As Integer = 20
+    Private Const ALLAPPS_WIDTH As Integer = 240
+    Private Const ALLAPPS_ROW_H As Integer = 34
+    Private Const ALLAPPS_LETTER_H As Integer = 28
+    Private Const CAT_CARD_W As Integer = 72
+    Private Const CAT_CARD_H As Integer = 72
+    ' Computed available width for left content area (pinned + categories)
+    ' = FormWidth - AllAppsWidth - divider - leftPadding - rightPadding - scrollbar margin
+    Private Const LEFT_CONTENT_W As Integer = FORM_WIDTH - ALLAPPS_WIDTH - 1 - SECTION_PAD - 10 - 20
+
+    ' Colors
+    Private ReadOnly clrBackground As Color = Color.FromArgb(220, 32, 32, 32)
+    Private ReadOnly clrSurface As Color = Color.FromArgb(180, 48, 48, 48)
+    Private ReadOnly clrSurfaceHover As Color = Color.FromArgb(200, 70, 70, 70)
+    Private ReadOnly clrAccent As Color = Color.FromArgb(255, 96, 165, 250)
+    Private ReadOnly clrTextPrimary As Color = Color.FromArgb(255, 240, 240, 240)
+    Private ReadOnly clrTextSecondary As Color = Color.FromArgb(180, 200, 200, 200)
+    Private ReadOnly clrDivider As Color = Color.FromArgb(60, 255, 255, 255)
+    Private ReadOnly clrSearchBg As Color = Color.FromArgb(160, 60, 60, 60)
+    Private ReadOnly clrCardBg As Color = Color.FromArgb(120, 55, 55, 55)
+    Private ReadOnly clrCardHover As Color = Color.FromArgb(160, 80, 80, 80)
+    Private ReadOnly clrLetterBg As Color = Color.FromArgb(80, 96, 165, 250)
+
+    ' Pinned entries (max ~12)
+    Private pinnedEntries As New List(Of AppEntry)()
+    ' Category buckets
+    Private categories As New List(Of (Name As String, Entries As List(Of AppEntry)))()
+#End Region
+
+    Public Sub New()
+        Me.SetStyle(ControlStyles.AllPaintingInWmPaint Or ControlStyles.UserPaint Or ControlStyles.OptimizedDoubleBuffer, True)
+        Me.FormBorderStyle = FormBorderStyle.None
+        Me.StartPosition = FormStartPosition.CenterScreen
+        Me.Size = New Size(FORM_WIDTH, FORM_HEIGHT)
+        Me.BackColor = Color.FromArgb(255, 30, 30, 30)
+        Me.ShowInTaskbar = False
+        Me.KeyPreview = True
+
+        AddHandler Me.KeyDown, AddressOf Form_KeyDown
+        AddHandler Me.Deactivate, AddressOf Form_Deactivate
+
+        BuildUI()
+        LoadStartMenuApps()
+        BuildPinned()
+        BuildCategories()
+    End Sub
+
+    Protected Overrides Sub OnHandleCreated(e As EventArgs)
+        MyBase.OnHandleCreated(e)
+        If micaEnabled Then ApplyMicaBackdrop()
+    End Sub
+
+    Private Sub ApplyMicaBackdrop()
         Try
-            Dim iid As New Guid("bcc18b79-ba16-442f-80c4-8a59c30c463b")
-            Dim pUnk As IntPtr = IntPtr.Zero
-            Dim hr = SHCreateItemFromParsingName(parsingName, IntPtr.Zero, iid, pUnk)
-            If hr <> 0 OrElse pUnk = IntPtr.Zero Then Return Nothing
+            ' Enable dark mode for window chrome
+            Dim darkMode As Integer = 1
+            DwmSetWindowAttribute(Me.Handle, DWMWA_USE_IMMERSIVE_DARK_MODE, darkMode, 4)
 
-            Dim factory = CType(Marshal.GetObjectForIUnknown(pUnk), IShellItemImageFactory)
-            Marshal.Release(pUnk)
+            ' Extend frame into entire client area — must be done BEFORE setting backdrop
+            Dim m As New MARGINS() With {.Left = -1, .Right = -1, .Top = -1, .Bottom = -1}
+            DwmExtendFrameIntoClientArea(Me.Handle, m)
 
-            Dim hbm As IntPtr = IntPtr.Zero
-            Dim s As New SHSIZE(size, size)
-            Const SIIGBF_RESIZETOFIT As UInteger = 0
-            Dim res = factory.GetImage(s, SIIGBF_RESIZETOFIT, hbm)
-            If res = 0 AndAlso hbm <> IntPtr.Zero Then
-                Dim bmp As Bitmap = Nothing
-                Try
-                    bmp = Bitmap.FromHbitmap(hbm)
-                    ' convert to 32bpp to avoid palette issues
-                    Dim copy = New Bitmap(bmp.Width, bmp.Height, PixelFormat.Format32bppPArgb)
-                    Using g = Graphics.FromImage(copy)
-                        g.DrawImage(bmp, New Rectangle(0, 0, copy.Width, copy.Height))
-                    End Using
-                    Try
-                        MakeBlackTransparent(copy)
-                    Catch
-                    End Try
-                    Return copy
-                Finally
-                    If bmp IsNot Nothing Then bmp.Dispose()
-                    DeleteObject(hbm)
-                End Try
+            ' Try Mica first (Win11 22H2+)
+            Dim backdropType As Integer = DWMSBT_MAINWINDOW
+            Dim hr = DwmSetWindowAttribute(Me.Handle, DWMWA_SYSTEMBACKDROP_TYPE, backdropType, 4)
+
+            If hr <> 0 Then
+                ' Fallback: try the older Mica attribute (Win11 21H2)
+                Dim micaOn As Integer = 1
+                hr = DwmSetWindowAttribute(Me.Handle, DWMWA_MICA_EFFECT, micaOn, 4)
             End If
+
+            ' If either succeeded, mark as applied so we don't paint over it
+            micaApplied = True
+
+            ' Force a
+            Me.Invalidate(True)
         Catch
+            ' Mica not available — fall back to solid dark
+            micaApplied = False
         End Try
-        Return Nothing
-    End Function
-
-    Private Sub OnSearchTextChanged(sender As Object, e As EventArgs)
-        Dim q = txtSearch.Text.Trim()
-        ApplyFilter(q)
     End Sub
 
-    Private Sub ApplyFilter(query As String)
-        lstApps.BeginUpdate()
-        lstApps.Items.Clear()
-        lstApps.Groups.Clear()
+    Protected Overrides ReadOnly Property CreateParams As CreateParams
+        Get
+            Dim cp = MyBase.CreateParams
+            If micaEnabled Then
+                ' Add WS_CAPTION so DWM has a frame to apply Mica/Acrylic to.
+                ' We remove the actual title bar visually via WM_NCCALCSIZE.
+                cp.Style = cp.Style Or WS_CAPTION
+            End If
+            ' Reduce flicker
+            cp.ExStyle = cp.ExStyle Or &H2000000 ' WS_EX_COMPOSITED
+            Return cp
+        End Get
+    End Property
 
-        Dim filtered = allEntries.Where(Function(a) String.IsNullOrEmpty(query) OrElse a.Name.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0).ToList()
-        Dim groups = filtered.Select(Function(a) a.Group).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(Function(x) x).ToList()
-        For Each g In groups
-            lstApps.Groups.Add(New ListViewGroup(g, g))
-        Next
-
-        For Each e In filtered.OrderBy(Function(x) x.Name)
-            Dim item = New ListViewItem(e.Name)
-            item.Tag = e.ShortcutPath
-            item.ImageKey = e.Key
-            Dim grp = lstApps.Groups.Cast(Of ListViewGroup)().FirstOrDefault(Function(gg) String.Equals(gg.Header, e.Group, StringComparison.OrdinalIgnoreCase))
-            If grp IsNot Nothing Then item.Group = grp
-            lstApps.Items.Add(item)
-        Next
-
-        lstApps.EndUpdate()
+    Protected Overrides Sub WndProc(ByRef m As Message)
+        If micaEnabled AndAlso m.Msg = WM_NCCALCSIZE AndAlso m.WParam <> IntPtr.Zero Then
+            ' Return 0 to remove the non-client area (title bar) while keeping WS_CAPTION
+            ' This is the trick that makes Mica work on a visually borderless window
+            m.Result = IntPtr.Zero
+            Return
+        End If
+        MyBase.WndProc(m)
     End Sub
 
+    Private Sub Form_Deactivate(sender As Object, e As EventArgs)
+        ' Close when user clicks away, like a real start menu
+        Me.Close()
+    End Sub
+
+    Private Sub Form_KeyDown(sender As Object, e As KeyEventArgs)
+        If e.KeyCode = Keys.Escape Then
+            Me.Close()
+        ElseIf Not txtSearch.Focused Then
+            ' Redirect typing to search
+            txtSearch.Focus()
+        End If
+    End Sub
+
+#Region "UI Construction"
+    Private Sub BuildUI()
+        ' Top user bar with avatar, search, power
+        pnlUserBar = New Panel() With {
+            .Dock = DockStyle.Top,
+            .Height = 56,
+            .BackColor = Color.Transparent
+        }
+        AddHandler pnlUserBar.Paint, AddressOf PaintUserBar
+        AddHandler pnlUserBar.MouseClick, AddressOf UserBarClick
+        Me.Controls.Add(pnlUserBar)
+
+        ' Search box inside user bar — we overlay it
+        txtSearch = New TextBox() With {
+            .Font = New Font("Segoe UI", 11, FontStyle.Regular),
+            .ForeColor = clrTextPrimary,
+            .BackColor = Color.FromArgb(255, 50, 50, 50),
+            .BorderStyle = BorderStyle.None,
+            .Width = 320,
+            .Height = 28
+        }
+        txtSearch.Location = New Point((FORM_WIDTH - txtSearch.Width) \ 2, 14)
+        pnlUserBar.Controls.Add(txtSearch)
+        AddHandler txtSearch.TextChanged, AddressOf OnSearchTextChanged
+
+        ' Main content panel
+        Dim pnlMain As New Panel() With {
+            .Dock = DockStyle.Fill,
+            .BackColor = Color.Transparent,
+            .Padding = New Padding(0)
+        }
+        Me.Controls.Add(pnlMain)
+
+        ' All Apps panel on the right
+        pnlAllApps = New Panel() With {
+            .Dock = DockStyle.Right,
+            .Width = ALLAPPS_WIDTH,
+            .BackColor = Color.Transparent
+        }
+        AddHandler pnlAllApps.Paint, AddressOf PaintAllApps
+        AddHandler pnlAllApps.MouseClick, AddressOf AllAppsClick
+        AddHandler pnlAllApps.MouseMove, AddressOf AllAppsMouseMove
+        AddHandler pnlAllApps.MouseLeave, AddressOf AllAppsMouseLeave
+        AddHandler pnlAllApps.MouseWheel, AddressOf AllAppsWheel
+        pnlMain.Controls.Add(pnlAllApps)
+
+        ' Divider line
+        Dim divider As New Panel() With {
+            .Dock = DockStyle.Right,
+            .Width = 1,
+            .BackColor = clrDivider
+        }
+        pnlMain.Controls.Add(divider)
+
+        ' Left area: scrollable panel containing pinned + categories
+        Dim pnlLeft As New Panel() With {
+            .Dock = DockStyle.Fill,
+            .BackColor = Color.Transparent,
+            .AutoScroll = True,
+            .Padding = New Padding(SECTION_PAD, 10, 10, 10)
+        }
+        pnlMain.Controls.Add(pnlLeft)
+
+        ' Categories below pinned (add SECOND — Dock.Top stacks in reverse add order)
+        pnlCategories = New Panel() With {
+            .Dock = DockStyle.Top,
+            .Height = 300,
+            .BackColor = Color.Transparent
+        }
+        AddHandler pnlCategories.Paint, AddressOf PaintCategories
+        AddHandler pnlCategories.MouseClick, AddressOf CategoriesClick
+        AddHandler pnlCategories.MouseMove, AddressOf CategoriesMouseMove
+        AddHandler pnlCategories.MouseLeave, AddressOf CategoriesMouseLeave
+        pnlLeft.Controls.Add(pnlCategories)
+
+        ' Pinned section at top (add LAST so it docks above categories)
+        pnlPinned = New Panel() With {
+            .Dock = DockStyle.Top,
+            .Height = 260,
+            .BackColor = Color.Transparent
+        }
+        AddHandler pnlPinned.Paint, AddressOf PaintPinned
+        AddHandler pnlPinned.MouseClick, AddressOf PinnedClick
+        AddHandler pnlPinned.MouseMove, AddressOf PinnedMouseMove
+        AddHandler pnlPinned.MouseLeave, AddressOf PinnedMouseLeave
+        pnlLeft.Controls.Add(pnlPinned)
+    End Sub
+#End Region
+
+#Region "Data Loading"
     Private Sub LoadStartMenuApps()
-        ' Use StartMenu roots (which include Programs as a subfolder) plus Desktop.
         Dim roots As New List(Of String)()
         roots.Add(Environment.GetFolderPath(Environment.SpecialFolder.StartMenu))
         roots.Add(Environment.GetFolderPath(Environment.SpecialFolder.CommonStartMenu))
         roots.Add(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory))
         roots.Add(Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory))
 
-        ' Only scan for .lnk files — CreateShortcut only works on .lnk
         Dim files As New List(Of String)()
         For Each root In roots.Distinct(StringComparer.OrdinalIgnoreCase)
             Try
@@ -253,7 +342,6 @@ Public Class frmStart
             End Try
         Next
 
-        ' Group roots for determining folder group names (longest match first)
         Dim groupRoots = New String() {
             Environment.GetFolderPath(Environment.SpecialFolder.Programs),
             Environment.GetFolderPath(Environment.SpecialFolder.CommonPrograms),
@@ -261,7 +349,6 @@ Public Class frmStart
             Environment.GetFolderPath(Environment.SpecialFolder.CommonStartMenu)
         }.Where(Function(r) Not String.IsNullOrEmpty(r)).OrderByDescending(Function(r) r.Length).ToArray()
 
-        ' Resolve shortcuts and deduplicate by stable key (exe path or appsfolder id)
         Dim resolved As New Dictionary(Of String, AppEntry)(StringComparer.OrdinalIgnoreCase)
         For Each f In files
             Try
@@ -270,7 +357,6 @@ Public Class frmStart
                 Dim target = If(lnk.TargetPath, String.Empty)
                 Dim args = If(lnk.Arguments, String.Empty)
 
-                ' Display name is always the shortcut filename
                 Dim display = Path.GetFileNameWithoutExtension(f)
                 If String.IsNullOrEmpty(display) AndAlso Not String.IsNullOrEmpty(target) Then
                     display = Path.GetFileNameWithoutExtension(target)
@@ -283,38 +369,26 @@ Public Class frmStart
                     If tname = "explorer.exe" AndAlso Not String.IsNullOrEmpty(args) AndAlso args.IndexOf("appsfolder", StringComparison.OrdinalIgnoreCase) >= 0 Then
                         key = args.Trim()
                     Else
-                        Try
-                            key = Path.GetFullPath(target)
-                        Catch
-                            key = target
-                        End Try
+                        Try : key = Path.GetFullPath(target) : Catch : key = target : End Try
                     End If
                 ElseIf Not String.IsNullOrEmpty(args) AndAlso args.IndexOf("appsfolder", StringComparison.OrdinalIgnoreCase) >= 0 Then
                     key = args.Trim()
                 End If
+                If String.IsNullOrEmpty(key) Then key = f
 
-                ' Fallback: use the shortcut file path as key (for .lnk with empty target, e.g. File Explorer, Control Panel)
-                If String.IsNullOrEmpty(key) Then
-                    key = f
-                End If
-
-                ' Determine group from shortcut folder
                 Dim groupName = "Programs"
                 Try
                     Dim dir = Path.GetDirectoryName(f)
                     For Each r In groupRoots
                         If dir.StartsWith(r, StringComparison.OrdinalIgnoreCase) Then
                             Dim rel = dir.Substring(r.Length).TrimStart(Path.DirectorySeparatorChar)
-                            If Not String.IsNullOrEmpty(rel) Then
-                                groupName = rel.Replace(Path.DirectorySeparatorChar, " "c)
-                            End If
+                            If Not String.IsNullOrEmpty(rel) Then groupName = rel.Replace(Path.DirectorySeparatorChar, " "c)
                             Exit For
                         End If
                     Next
                 Catch
                 End Try
 
-                ' Prefer user StartMenu entry over common when same key exists
                 If resolved.ContainsKey(key) Then
                     Dim existing = resolved(key)
                     Dim userStart = Environment.GetFolderPath(Environment.SpecialFolder.StartMenu)
@@ -330,8 +404,7 @@ Public Class frmStart
             End Try
         Next
 
-        ' Also enumerate installed Store/UWP apps via shell:AppsFolder
-        ' These don't have .lnk files but are visible in the Windows Start menu
+        ' Enumerate Store/UWP apps via shell:AppsFolder
         Try
             Dim shellApp = CreateObject("Shell.Application")
             Dim appsFolder = shellApp.NameSpace("shell:AppsFolder")
@@ -341,17 +414,10 @@ Public Class frmStart
                         Dim appName As String = item.Name
                         Dim appPath As String = item.Path
                         If String.IsNullOrEmpty(appName) OrElse String.IsNullOrEmpty(appPath) Then Continue For
-
-                        ' Skip if we already have this app from .lnk scanning (by name or by appsfolder key)
                         If resolved.ContainsKey(appPath) Then Continue For
-
-                        ' Build a launch path: shell:AppsFolder\{appPath}
                         Dim launchPath = "shell:AppsFolder\" & appPath
                         resolved(appPath) = New AppEntry() With {
-                            .Name = appName,
-                            .Key = appPath,
-                            .ShortcutPath = launchPath,
-                            .Group = "Apps"
+                            .Name = appName, .Key = appPath, .ShortcutPath = launchPath, .Group = "Apps"
                         }
                     Catch
                     End Try
@@ -360,248 +426,205 @@ Public Class frmStart
         Catch
         End Try
 
-        ' Populate internal list, deduplicating by display name
+        ' Deduplicate by display name, build final list
         allEntries.Clear()
-        Dim entries = resolved.Values.ToList()
         Dim seen As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
-        For Each entry In entries.OrderBy(Function(x) x.Name)
+        For Each entry In resolved.Values.OrderBy(Function(x) x.Name)
             If seen.Contains(entry.Name) Then Continue For
             seen.Add(entry.Name)
+            ' Auto-categorize
+            entry.Category = CategorizeApp(entry)
             allEntries.Add(entry)
-            ' Add icon for the entry
-            Try
-                If imgList.Images.ContainsKey(entry.Key) Then
-                    ' already added
-                ElseIf File.Exists(entry.Key) Then
-                    Dim ico = Icon.ExtractAssociatedIcon(entry.Key)
-                    imgList.Images.Add(entry.Key, ico.ToBitmap())
-                Else
-                    ' For Store apps and shortcuts with non-file keys, try a few fallbacks:
-                    Dim gotIcon = False
-                    ' 1) Extract icon from the shortcut file itself (if present)
-                    If Not String.IsNullOrEmpty(entry.ShortcutPath) AndAlso entry.ShortcutPath.EndsWith(".lnk", StringComparison.OrdinalIgnoreCase) AndAlso File.Exists(entry.ShortcutPath) Then
-                        Try
-                            Dim ico = Icon.ExtractAssociatedIcon(entry.ShortcutPath)
-                            If ico IsNot Nothing Then
-                                imgList.Images.Add(entry.Key, ico.ToBitmap())
-                                gotIcon = True
-                            End If
-                        Catch
-                        End Try
-                    End If
-                    ' 2) If this is a shell:AppsFolder entry (UWP/Store app), try Shell image factory
-                    If Not gotIcon Then
-                        Try
-                            Dim parsingName As String = Nothing
-                            If Not String.IsNullOrEmpty(entry.ShortcutPath) AndAlso entry.ShortcutPath.StartsWith("shell:AppsFolder", StringComparison.OrdinalIgnoreCase) Then
-                                parsingName = entry.ShortcutPath
-                            Else
-                                parsingName = "shell:AppsFolder\" & entry.Key
-                            End If
-                            Dim bmpUwp = GetShellIconBitmap(parsingName, imgList.ImageSize.Width)
-                            If bmpUwp IsNot Nothing Then
-                                imgList.Images.Add(entry.Key, bmpUwp)
-                                gotIcon = True
-                            End If
-                        Catch
-                        End Try
-                    End If
-                    ' 3) Final fallback: generic placeholder
-                    If Not gotIcon Then
-                        Dim bmp = New Bitmap(imgList.ImageSize.Width, imgList.ImageSize.Height)
-                        Using gr = Graphics.FromImage(bmp)
-                            gr.Clear(Color.LightGray)
-                        End Using
-                        imgList.Images.Add(entry.Key, bmp)
-                    End If
-                End If
-            Catch
-            End Try
+            ' Load icon
+            LoadEntryIcon(entry)
         Next
-
-        ApplyFilter(txtSearch.Text.Trim())
     End Sub
 
-    Private Sub LoadPinnedTiles()
-        ' Try to load pinned shortcuts from taskbar pinned folder as tiles
+    Private Sub LoadEntryIcon(entry As AppEntry)
+        If imgDict.ContainsKey(entry.Key) Then Return
+        Try
+            ' 1) Try exe path directly
+            If File.Exists(entry.Key) Then
+                Dim ico = Icon.ExtractAssociatedIcon(entry.Key)
+                If ico IsNot Nothing Then
+                    imgDict(entry.Key) = ResizeIcon(ico.ToBitmap())
+                    Return
+                End If
+            End If
+            ' 2) Try shortcut file
+            If Not String.IsNullOrEmpty(entry.ShortcutPath) AndAlso entry.ShortcutPath.EndsWith(".lnk", StringComparison.OrdinalIgnoreCase) AndAlso File.Exists(entry.ShortcutPath) Then
+                Dim ico = Icon.ExtractAssociatedIcon(entry.ShortcutPath)
+                If ico IsNot Nothing Then
+                    imgDict(entry.Key) = ResizeIcon(ico.ToBitmap())
+                    Return
+                End If
+            End If
+            ' 3) Shell image factory (UWP/Store)
+            Dim parsingName As String = Nothing
+            If Not String.IsNullOrEmpty(entry.ShortcutPath) AndAlso entry.ShortcutPath.StartsWith("shell:AppsFolder", StringComparison.OrdinalIgnoreCase) Then
+                parsingName = entry.ShortcutPath
+            Else
+                parsingName = "shell:AppsFolder\" & entry.Key
+            End If
+            Dim bmpShell = GetShellIconBitmap(parsingName, LARGE_ICON_SIZE)
+            If bmpShell IsNot Nothing Then
+                imgDict(entry.Key) = bmpShell
+                Return
+            End If
+        Catch
+        End Try
+        ' Fallback placeholder
+        imgDict(entry.Key) = CreatePlaceholder(entry.Name)
+    End Sub
+
+    Private Function ResizeIcon(bmp As Bitmap) As Bitmap
+        If bmp.Width = LARGE_ICON_SIZE AndAlso bmp.Height = LARGE_ICON_SIZE Then Return bmp
+        Dim result = New Bitmap(LARGE_ICON_SIZE, LARGE_ICON_SIZE, PixelFormat.Format32bppPArgb)
+        Using g = Graphics.FromImage(result)
+            g.InterpolationMode = InterpolationMode.HighQualityBicubic
+            g.SmoothingMode = SmoothingMode.HighQuality
+            g.DrawImage(bmp, 0, 0, LARGE_ICON_SIZE, LARGE_ICON_SIZE)
+        End Using
+        Return result
+    End Function
+
+    Private Function CreatePlaceholder(name As String) As Bitmap
+        Dim bmp = New Bitmap(LARGE_ICON_SIZE, LARGE_ICON_SIZE, PixelFormat.Format32bppPArgb)
+        Using g = Graphics.FromImage(bmp)
+            g.SmoothingMode = SmoothingMode.HighQuality
+            Using br = New SolidBrush(clrAccent)
+                g.FillEllipse(br, 2, 2, LARGE_ICON_SIZE - 4, LARGE_ICON_SIZE - 4)
+            End Using
+            If Not String.IsNullOrEmpty(name) Then
+                Dim letter = name.Substring(0, 1).ToUpper()
+                Using fnt = New Font("Segoe UI", 16, FontStyle.Bold)
+                    Using sf = New StringFormat() With {.Alignment = StringAlignment.Center, .LineAlignment = StringAlignment.Center}
+                        g.DrawString(letter, fnt, Brushes.White, New RectangleF(0, 0, LARGE_ICON_SIZE, LARGE_ICON_SIZE), sf)
+                    End Using
+                End Using
+            End If
+        End Using
+        Return bmp
+    End Function
+
+    Private Function GetShellIconBitmap(parsingName As String, size As Integer) As Bitmap
+        Try
+            Dim iid As New Guid("bcc18b79-ba16-442f-80c4-8a59c30c463b")
+            Dim pUnk As IntPtr = IntPtr.Zero
+            Dim hr = SHCreateItemFromParsingName(parsingName, IntPtr.Zero, iid, pUnk)
+            If hr <> 0 OrElse pUnk = IntPtr.Zero Then Return Nothing
+
+            Dim factory = CType(Marshal.GetObjectForIUnknown(pUnk), IShellItemImageFactory)
+            Marshal.Release(pUnk)
+
+            Dim hbm As IntPtr = IntPtr.Zero
+            Dim s As New SHSIZE(size, size)
+            Dim res = factory.GetImage(s, 0UI, hbm)
+            If res = 0 AndAlso hbm <> IntPtr.Zero Then
+                Try
+                    Dim raw = Bitmap.FromHbitmap(hbm)
+                    Dim copy = New Bitmap(raw.Width, raw.Height, PixelFormat.Format32bppPArgb)
+                    Using g = Graphics.FromImage(copy)
+                        g.DrawImage(raw, 0, 0, copy.Width, copy.Height)
+                    End Using
+                    raw.Dispose()
+                    Return copy
+                Finally
+                    DeleteObject(hbm)
+                End Try
+            End If
+        Catch
+        End Try
+        Return Nothing
+    End Function
+
+    Private Function CategorizeApp(entry As AppEntry) As String
+        Dim n = entry.Name.ToLowerInvariant()
+        Dim k = entry.Key.ToLowerInvariant()
+        Dim g = If(entry.Group, "").ToLowerInvariant()
+
+        ' Developer Tools
+        If n.Contains("visual studio") OrElse n.Contains("code") OrElse n.Contains("powershell") OrElse
+           n.Contains("command prompt") OrElse n.Contains("git ") OrElse n.Contains("docker") OrElse
+           n.Contains("terminal") OrElse n.Contains("developer") OrElse n.Contains("debugg") OrElse
+           n.Contains("godot") OrElse n.Contains("registry") OrElse g.Contains("developer") Then
+            Return "Developer Tools"
+        End If
+        ' Creative Apps
+        If n.Contains("photoshop") OrElse n.Contains("figma") OrElse n.Contains("lightroom") OrElse
+           n.Contains("gimp") OrElse n.Contains("blender") OrElse n.Contains("inkscape") OrElse
+           n.Contains("premiere") OrElse n.Contains("after effects") OrElse n.Contains("obs") OrElse
+           n.Contains("openshot") OrElse n.Contains("paint") OrElse n.Contains("photo") OrElse
+           n.Contains("video") OrElse n.Contains("movie") Then
+            Return "Creative Apps"
+        End If
+        ' Quick Access
+        If n.Contains("file explorer") OrElse n.Contains("calculator") OrElse n.Contains("notepad") OrElse
+           n.Contains("settings") OrElse n.Contains("snipping") OrElse n.Contains("onedrive") OrElse
+           n.Contains("control panel") OrElse n.Contains("task manager") Then
+            Return "Quick Access"
+        End If
+        ' Browsers
+        If n.Contains("edge") OrElse n.Contains("chrome") OrElse n.Contains("firefox") OrElse
+           n.Contains("zen") OrElse n.Contains("brave") OrElse n.Contains("opera") Then
+            Return "Browsers"
+        End If
+        ' Gaming
+        If n.Contains("xbox") OrElse n.Contains("steam") OrElse n.Contains("epic") OrElse
+           n.Contains("hytale") OrElse n.Contains("minecraft") OrElse n.Contains("game") Then
+            Return "Gaming"
+        End If
+
+        Return ""
+    End Function
+
+    Private Sub BuildPinned()
+        pinnedEntries.Clear()
+        ' First try taskbar pinned shortcuts
         Try
             Dim appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData)
-            Dim taskband = IO.Path.Combine(appData, "Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar")
-            Dim shortcuts As New List(Of String)
-            If IO.Directory.Exists(taskband) Then shortcuts.AddRange(IO.Directory.GetFiles(taskband, "*.lnk"))
-
-            If shortcuts.Count = 0 Then
-                ' fallback: use first few entries from allEntries
-                For Each e In allEntries.Take(6)
-                    AddTile(e)
-                Next
-            Else
-                For Each s In shortcuts.Distinct().Take(12)
+            Dim taskband = Path.Combine(appData, "Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar")
+            If Directory.Exists(taskband) Then
+                Dim shortcuts = Directory.GetFiles(taskband, "*.lnk")
+                For Each s In shortcuts.Take(8)
                     Try
                         Dim key = ResolveShortcutKey(s)
-                        Dim name = Path.GetFileNameWithoutExtension(s)
                         Dim entry = allEntries.FirstOrDefault(Function(a) String.Equals(a.Key, key, StringComparison.OrdinalIgnoreCase))
-                        If entry IsNot Nothing Then
-                            AddTile(entry)
-                        Else
-                            Dim entry2 As New AppEntry() With {.Name = name, .Key = key, .ShortcutPath = s, .Group = "Pinned"}
-                            AddTile(entry2)
+                        If entry IsNot Nothing AndAlso Not pinnedEntries.Contains(entry) Then
+                            pinnedEntries.Add(entry)
                         End If
                     Catch
                     End Try
                 Next
             End If
-            ' Also populate right-side quick area
-            PopulateRightSide(shortcuts)
-
-            ' Quick fix: hide center tiles area when empty
-            Try
-                flowTiles.Visible = (flowTiles.Controls.Count > 0)
-                If rightPanel IsNot Nothing Then rightPanel.Refresh()
-            Catch
-            End Try
         Catch
         End Try
-    End Sub
 
-    Private Sub PopulateRightSide(shortcuts As List(Of String))
-        Try
-            flowRight.SuspendLayout()
-            ' Remove any existing buttons except the toggle
-            For i = flowRight.Controls.Count - 1 To 0 Step -1
-                Dim c = flowRight.Controls(i)
-                If c Is chkRightTiles Then Continue For
-                flowRight.Controls.RemoveAt(i)
-                c.Dispose()
+        ' Fill up to 12 with popular apps if needed
+        If pinnedEntries.Count < 12 Then
+            Dim popularNames = {"Microsoft Edge", "File Explorer", "Settings", "Visual Studio",
+                                "Visual Studio Code", "Notepad", "Calculator", "Microsoft Store",
+                                "Spotify", "Discord", "Steam", "Task Manager"}
+            For Each pn In popularNames
+                If pinnedEntries.Count >= 12 Then Exit For
+                Dim entry = allEntries.FirstOrDefault(Function(a) String.Equals(a.Name, pn, StringComparison.OrdinalIgnoreCase))
+                If entry IsNot Nothing AndAlso Not pinnedEntries.Contains(entry) Then
+                    pinnedEntries.Add(entry)
+                End If
             Next
-
-            If rightAsTiles Then
-                ' larger tiles vertically stacked
-                If shortcuts IsNot Nothing AndAlso shortcuts.Count > 0 Then
-                    For Each s In shortcuts.Distinct().Take(6)
-                        Try
-                            Dim key = ResolveShortcutKey(s)
-                            Dim entry = allEntries.FirstOrDefault(Function(a) String.Equals(a.Key, key, StringComparison.OrdinalIgnoreCase))
-                            If entry Is Nothing Then
-                                entry = New AppEntry() With {.Name = Path.GetFileNameWithoutExtension(s), .Key = key, .ShortcutPath = s, .Group = "Pinned"}
-                            End If
-                            Dim btn = New Button()
-                            Dim targetW = Math.Max(72, flowRight.ClientSize.Width - 12)
-                            btn.Width = targetW
-                            btn.Height = 64
-                            btn.Text = entry.Name
-                            btn.TextAlign = ContentAlignment.MiddleLeft
-                            btn.ImageAlign = ContentAlignment.MiddleLeft
-                            btn.FlatStyle = FlatStyle.Flat
-                            btn.FlatAppearance.BorderSize = 0
-                            btn.Margin = New Padding(4)
-                            btn.BackColor = Color.Transparent
-                            If imgList.Images.ContainsKey(entry.Key) Then btn.Image = imgList.Images(entry.Key)
-                            AddHandler btn.Click, Sub(sa, ea)
-                                                      Try
-                                                          If Not String.IsNullOrEmpty(entry.ShortcutPath) Then Process.Start(New ProcessStartInfo(entry.ShortcutPath) With {.UseShellExecute = True})
-                                                      Catch
-                                                      End Try
-                                                  End Sub
-                            ' insert after the toggle checkbox
-                            flowRight.Controls.Add(btn)
-                        Catch
-                        End Try
-                    Next
-                Else
-                    For Each e In allEntries.Take(6)
-                        AddRightIcon(e)
-                    Next
-                End If
-            Else
-                ' icons: create small square buttons
-                If shortcuts IsNot Nothing AndAlso shortcuts.Count > 0 Then
-                    For Each s In shortcuts.Distinct().Take(16)
-                        Try
-                            Dim key = ResolveShortcutKey(s)
-                            Dim entry = allEntries.FirstOrDefault(Function(a) String.Equals(a.Key, key, StringComparison.OrdinalIgnoreCase))
-                            If entry Is Nothing Then
-                                entry = New AppEntry() With {.Name = Path.GetFileNameWithoutExtension(s), .Key = key, .ShortcutPath = s, .Group = "Pinned"}
-                            End If
-                            AddRightIcon(entry)
-                        Catch
-                        End Try
-                    Next
-                Else
-                    For Each e In allEntries.Take(8)
-                        AddRightIcon(e)
-                    Next
-                End If
-            End If
-        Finally
-            flowRight.ResumeLayout()
-        End Try
+        End If
     End Sub
 
-    Private Sub AddRightIcon(entry As AppEntry)
-        Try
-            Dim btn = New Button()
-            btn.Width = 36
-            btn.Height = 36
-            btn.Margin = New Padding(4)
-            btn.FlatStyle = FlatStyle.Flat
-            btn.FlatAppearance.BorderSize = 0
-            btn.Text = String.Empty
-            btn.BackColor = Color.Transparent
-            If imgList.Images.ContainsKey(entry.Key) Then
-                btn.BackgroundImage = imgList.Images(entry.Key)
-                btn.BackgroundImageLayout = ImageLayout.Zoom
-            Else
-                btn.Text = entry.Name.Substring(0, Math.Min(3, entry.Name.Length))
-            End If
-            AddHandler btn.Click, Sub(sa, ea)
-                                      Try
-                                          If Not String.IsNullOrEmpty(entry.ShortcutPath) Then Process.Start(New ProcessStartInfo(entry.ShortcutPath) With {.UseShellExecute = True})
-                                      Catch
-                                      End Try
-                                  End Sub
-            flowRight.Controls.Add(btn)
-        Catch
-        End Try
-    End Sub
+    Private Sub BuildCategories()
+        categories.Clear()
+        ' Group entries that have a category
+        Dim catGroups = allEntries.Where(Function(a) Not String.IsNullOrEmpty(a.Category)).
+            GroupBy(Function(a) a.Category).
+            OrderBy(Function(g) g.Key).ToList()
 
-    Private Sub OnRightTilesToggled(sender As Object, e As EventArgs)
-        rightAsTiles = chkRightTiles.Checked
-        ' refresh right side using previously discovered pinned shortcuts if available
-        Dim appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData)
-        Dim taskband = IO.Path.Combine(appData, "Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar")
-        Dim shortcuts As New List(Of String)
-        If IO.Directory.Exists(taskband) Then shortcuts.AddRange(IO.Directory.GetFiles(taskband, "*.lnk"))
-        PopulateRightSide(shortcuts)
-    End Sub
-
-    Private Sub AddTile(entry As AppEntry)
-        Try
-            Dim btn = New Button()
-            btn.Width = 120
-            btn.Height = 80
-            btn.Text = entry.Name
-            btn.TextAlign = ContentAlignment.BottomCenter
-            btn.ImageAlign = ContentAlignment.TopCenter
-            btn.FlatStyle = FlatStyle.Flat
-            btn.Margin = New Padding(6)
-            Try
-                If imgList.Images.ContainsKey(entry.Key) Then
-                    btn.Image = imgList.Images(entry.Key)
-                End If
-            Catch
-            End Try
-            AddHandler btn.Click, Sub(s, e)
-                                      Try
-                                          If Not String.IsNullOrEmpty(entry.ShortcutPath) Then
-                                              Process.Start(New ProcessStartInfo(entry.ShortcutPath) With {.UseShellExecute = True})
-                                          End If
-                                      Catch
-                                      End Try
-                                  End Sub
-            flowTiles.Controls.Add(btn)
-        Catch
-        End Try
+        For Each cg In catGroups
+            categories.Add((cg.Key, cg.Take(6).ToList()))
+        Next
     End Sub
 
     Private Function ResolveShortcutKey(shortcutPath As String) As String
@@ -624,21 +647,517 @@ Public Class frmStart
         End Try
         Return shortcutPath
     End Function
+#End Region
 
-    Private Sub InitializeComponent()
-
+#Region "Painting"
+    Protected Overrides Sub OnPaintBackground(e As PaintEventArgs)
+        If micaApplied Then
+            ' Paint semi-transparent so Mica shows through but text has a surface for ClearType
+            Using br = New SolidBrush(Color.FromArgb(180, 28, 28, 28))
+                e.Graphics.FillRectangle(br, Me.ClientRectangle)
+            End Using
+            Return
+        End If
+        ' Mica not available — paint solid dark background
+        Using br = New SolidBrush(Color.FromArgb(255, 30, 30, 30))
+            e.Graphics.FillRectangle(br, Me.ClientRectangle)
+        End Using
     End Sub
 
-    Private Sub OnAppActivated(sender As Object, e As EventArgs)
-        If lstApps.SelectedItems.Count = 0 Then Return
-        Dim item = lstApps.SelectedItems(0)
-        Dim shortcut = TryCast(item.Tag, String)
-        If String.IsNullOrEmpty(shortcut) Then Return
+    Private Sub PaintUserBar(sender As Object, e As PaintEventArgs)
+        Dim g = e.Graphics
+        g.SmoothingMode = SmoothingMode.HighQuality
+        g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit
+
+        ' User name on left
+        Dim userName = Environment.UserName
+        Using fnt = New Font("Segoe UI", 12, FontStyle.Regular)
+            Using br = New SolidBrush(clrTextPrimary)
+                ' Circle avatar
+                Dim avatarRect = New Rectangle(SECTION_PAD, 12, 32, 32)
+                Using avBr = New SolidBrush(clrAccent)
+                    g.FillEllipse(avBr, avatarRect)
+                End Using
+                Dim initial = userName.Substring(0, 1).ToUpper()
+                Using sf = New StringFormat() With {.Alignment = StringAlignment.Center, .LineAlignment = StringAlignment.Center}
+                    g.DrawString(initial, fnt, Brushes.White, New RectangleF(avatarRect.X, avatarRect.Y, avatarRect.Width, avatarRect.Height), sf)
+                End Using
+                g.DrawString(userName, fnt, br, SECTION_PAD + 40, 18)
+            End Using
+        End Using
+
+        ' Mica toggle (small text button)
+        Dim micaText = If(micaApplied, "[Mica: ON]", "[Mica: OFF]")
+        Using fnt = New Font("Segoe UI", 8, FontStyle.Regular)
+            Using br = New SolidBrush(clrTextSecondary)
+                g.DrawString(micaText, fnt, br, pnlUserBar.Width - 160, 22)
+            End Using
+        End Using
+
+        ' Power button on far right
+        Using fnt = New Font("Segoe UI Symbol", 14, FontStyle.Regular)
+            Using br = New SolidBrush(clrTextSecondary)
+                g.DrawString(ChrW(&H23FB), fnt, br, pnlUserBar.Width - 50, 14) ' power symbol ⏻
+            End Using
+        End Using
+    End Sub
+
+    Private Sub PaintPinned(sender As Object, e As PaintEventArgs)
+        Dim g = e.Graphics
+        g.SmoothingMode = SmoothingMode.HighQuality
+        g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit
+
+        ' Section header
+        Dim headerY = 4
+        Using fnt = New Font("Segoe UI", 13, FontStyle.Bold)
+            Using br = New SolidBrush(clrTextPrimary)
+                g.DrawString("Pinned", fnt, br, 4, headerY)
+            End Using
+        End Using
+
+        ' Render pinned cards in a grid
+        Dim startY = headerY + 32
+        Dim x = 4
+        Dim y = startY
+        Dim query = txtSearch.Text.Trim()
+        Dim isSearching = Not String.IsNullOrEmpty(query)
+        Dim entriesToShow = If(isSearching,
+            allEntries.Where(Function(a) a.Name.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0).Take(12).ToList(),
+            pinnedEntries)
+
+        If isSearching Then
+            Using fnt = New Font("Segoe UI", 13, FontStyle.Bold)
+                Using br = New SolidBrush(clrTextPrimary)
+                    g.DrawString("Search Results", fnt, br, 4, headerY)
+                End Using
+            End Using
+        End If
+
+        For i = 0 To entriesToShow.Count - 1
+            Dim entry = entriesToShow(i)
+            Dim cardRect = New Rectangle(x, y, CARD_W, CARD_H)
+            Dim isHovered = (pinnedHoveredIdx = i)
+
+            ' Card background with rounded corners
+            DrawRoundedCard(g, cardRect, If(isHovered, clrCardHover, clrCardBg), 8)
+
+            ' Icon
+            Dim icon As Bitmap = Nothing
+            If imgDict.ContainsKey(entry.Key) Then icon = imgDict(entry.Key)
+            If icon IsNot Nothing Then
+                Dim iconX = cardRect.X + (CARD_W - ICON_SIZE) \ 2
+                Dim iconY = cardRect.Y + 12
+                g.DrawImage(icon, iconX, iconY, ICON_SIZE, ICON_SIZE)
+            End If
+
+            ' Name
+            Using fnt = New Font("Segoe UI", 8, FontStyle.Regular)
+                Using br = New SolidBrush(clrTextPrimary)
+                    Using sf = New StringFormat() With {.Alignment = StringAlignment.Center, .LineAlignment = StringAlignment.Near, .Trimming = StringTrimming.EllipsisCharacter}
+                        Dim nameRect = New RectangleF(cardRect.X + 2, cardRect.Y + ICON_SIZE + 16, CARD_W - 4, CARD_H - ICON_SIZE - 18)
+                        g.DrawString(entry.Name, fnt, br, nameRect, sf)
+                    End Using
+                End Using
+            End Using
+
+            x += CARD_W + CARD_GAP
+            If x + CARD_W > LEFT_CONTENT_W Then
+                x = 4
+                y += CARD_H + CARD_GAP
+            End If
+        Next
+
+        ' Auto-size pinned panel height based on content
+        Dim neededH = y + CARD_H + CARD_GAP + 10
+        If neededH <> pnlPinned.Height AndAlso neededH > 80 Then
+            pnlPinned.Height = neededH
+        End If
+    End Sub
+
+    Private Sub PaintCategories(sender As Object, e As PaintEventArgs)
+        If categories.Count = 0 Then Return
+        Dim g = e.Graphics
+        g.SmoothingMode = SmoothingMode.HighQuality
+        g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit
+
+        ' Section header
+        Using fnt = New Font("Segoe UI", 13, FontStyle.Bold)
+            Using br = New SolidBrush(clrTextPrimary)
+                g.DrawString("Categories", fnt, br, 4, 4)
+            End Using
+        End Using
+
+        ' Draw category groups — each category is a titled row of cards
+        ' Categories flow left-to-right, wrapping to new row when out of space
+        Dim panelW = LEFT_CONTENT_W
+        Dim catBlockW = (CAT_CARD_W + 6) * 3 + 10  ' width of one category block (3 cards + label)
+        Dim curX = 4
+        Dim curY = 34
+        Dim catIdx = 0
+        Dim rowH = CAT_CARD_H + 28  ' card height + label height + gaps
+
+        For Each cat In categories
+            ' Wrap to next row if this category won't fit
+            If curX > 4 AndAlso curX + catBlockW > panelW Then
+                curX = 4
+                curY += rowH
+            End If
+
+            ' Category title
+            Using fnt = New Font("Segoe UI", 9, FontStyle.Bold)
+                Using br = New SolidBrush(clrTextSecondary)
+                    g.DrawString(cat.Name.ToUpper(), fnt, br, curX, curY)
+                End Using
+            End Using
+
+            ' Category items in a row
+            Dim itemX = curX
+            Dim itemY = curY + 20
+            For Each entry In cat.Entries.Take(3)
+                Dim cardRect = New Rectangle(itemX, itemY, CAT_CARD_W, CAT_CARD_H)
+                Dim isHov = (catHoveredIdx = catIdx)
+
+                DrawRoundedCard(g, cardRect, If(isHov, clrCardHover, clrCardBg), 6)
+
+                Dim icon As Bitmap = Nothing
+                If imgDict.ContainsKey(entry.Key) Then icon = imgDict(entry.Key)
+                If icon IsNot Nothing Then
+                    Dim ix = cardRect.X + (CAT_CARD_W - 24) \ 2
+                    g.DrawImage(icon, ix, cardRect.Y + 8, 24, 24)
+                End If
+
+                Using fnt = New Font("Segoe UI", 7, FontStyle.Regular)
+                    Using br = New SolidBrush(clrTextPrimary)
+                        Using sf = New StringFormat() With {.Alignment = StringAlignment.Center, .Trimming = StringTrimming.EllipsisCharacter}
+                            Dim nr = New RectangleF(cardRect.X, cardRect.Y + 36, CAT_CARD_W, CAT_CARD_H - 38)
+                            g.DrawString(entry.Name, fnt, br, nr, sf)
+                        End Using
+                    End Using
+                End Using
+
+                itemX += CAT_CARD_W + 6
+                catIdx += 1
+            Next
+
+            curX += catBlockW + 12
+        Next
+
+        ' Auto-size the panel height based on what we actually drew
+        Dim neededH = curY + rowH + 10
+        If pnlCategories.Height <> neededH Then
+            pnlCategories.Height = neededH
+        End If
+    End Sub
+
+    Private Sub PaintAllApps(sender As Object, e As PaintEventArgs)
+        Dim g = e.Graphics
+        g.SmoothingMode = SmoothingMode.HighQuality
+        g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit
+
+        ' Header
+        Using fnt = New Font("Segoe UI", 13, FontStyle.Bold)
+            Using br = New SolidBrush(clrTextPrimary)
+                g.DrawString("All Apps", fnt, br, 12, 4)
+            End Using
+        End Using
+
+        ' Build sorted list grouped by first letter
+        Dim query = txtSearch.Text.Trim()
+        Dim filtered = allEntries.Where(Function(a) String.IsNullOrEmpty(query) OrElse a.Name.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0).OrderBy(Function(a) a.Name).ToList()
+
+        Dim y = 34 - allAppsScrollOffset
+        Dim visibleIdx = 0
+        Dim currentLetter As String = ""
+        Dim clipRect = New Rectangle(0, 34, pnlAllApps.ClientSize.Width, pnlAllApps.ClientSize.Height - 34)
+        g.SetClip(clipRect)
+
+        For i = 0 To filtered.Count - 1
+            Dim entry = filtered(i)
+            Dim firstLetter = entry.Name.Substring(0, 1).ToUpper()
+            If Not Char.IsLetter(firstLetter(0)) Then firstLetter = "#"
+
+            ' Draw letter header
+            If firstLetter <> currentLetter Then
+                currentLetter = firstLetter
+                If y + ALLAPPS_LETTER_H > 34 AndAlso y < pnlAllApps.ClientSize.Height Then
+                    Using fnt = New Font("Segoe UI", 10, FontStyle.Bold)
+                        Using br = New SolidBrush(clrAccent)
+                            g.DrawString(currentLetter, fnt, br, 12, y + 2)
+                        End Using
+                    End Using
+                End If
+                y += ALLAPPS_LETTER_H
+            End If
+
+            ' Draw app row
+            If y + ALLAPPS_ROW_H > 34 AndAlso y < pnlAllApps.ClientSize.Height Then
+                Dim rowRect = New Rectangle(4, y, pnlAllApps.ClientSize.Width - 8, ALLAPPS_ROW_H)
+                Dim isHov = (allAppsHoveredIdx = i)
+                If isHov Then
+                    DrawRoundedCard(g, rowRect, clrCardHover, 4)
+                End If
+
+                ' Icon
+                Dim icon As Bitmap = Nothing
+                If imgDict.ContainsKey(entry.Key) Then icon = imgDict(entry.Key)
+                If icon IsNot Nothing Then
+                    g.DrawImage(icon, 14, y + (ALLAPPS_ROW_H - 20) \ 2, 20, 20)
+                End If
+
+                ' Name
+                Using fnt = New Font("Segoe UI", 9, FontStyle.Regular)
+                    Using br = New SolidBrush(clrTextPrimary)
+                        Using sf = New StringFormat() With {.LineAlignment = StringAlignment.Center, .Trimming = StringTrimming.EllipsisCharacter, .FormatFlags = StringFormatFlags.NoWrap}
+                            g.DrawString(entry.Name, fnt, br, New RectangleF(40, y, pnlAllApps.ClientSize.Width - 50, ALLAPPS_ROW_H), sf)
+                        End Using
+                    End Using
+                End Using
+            End If
+
+            y += ALLAPPS_ROW_H
+        Next
+
+        g.ResetClip()
+    End Sub
+
+    Private Sub DrawRoundedCard(g As Graphics, rect As Rectangle, fillColor As Color, radius As Integer)
+        Using path = New GraphicsPath()
+            path.AddArc(rect.X, rect.Y, radius * 2, radius * 2, 180, 90)
+            path.AddArc(rect.Right - radius * 2, rect.Y, radius * 2, radius * 2, 270, 90)
+            path.AddArc(rect.Right - radius * 2, rect.Bottom - radius * 2, radius * 2, radius * 2, 0, 90)
+            path.AddArc(rect.X, rect.Bottom - radius * 2, radius * 2, radius * 2, 90, 90)
+            path.CloseFigure()
+            Using br = New SolidBrush(fillColor)
+                g.FillPath(br, path)
+            End Using
+        End Using
+    End Sub
+#End Region
+
+#Region "Interaction"
+    Private Sub OnSearchTextChanged(sender As Object, e As EventArgs)
+        pnlPinned.Invalidate()
+        pnlAllApps.Invalidate()
+    End Sub
+
+    Private Sub LaunchEntry(entry As AppEntry)
+        If entry Is Nothing OrElse String.IsNullOrEmpty(entry.ShortcutPath) Then Return
         Try
-            Process.Start(New ProcessStartInfo(shortcut) With {.UseShellExecute = True})
+            Process.Start(New ProcessStartInfo(entry.ShortcutPath) With {.UseShellExecute = True})
             Me.Close()
         Catch ex As Exception
             MessageBox.Show("Failed to launch: " & ex.Message)
         End Try
+    End Sub
+
+    ' --- Pinned section mouse handling ---
+    Private Function GetPinnedEntryAt(pt As Point) As (Index As Integer, Entry As AppEntry)
+        Dim query = txtSearch.Text.Trim()
+        Dim isSearching = Not String.IsNullOrEmpty(query)
+        Dim entriesToShow = If(isSearching,
+            allEntries.Where(Function(a) a.Name.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0).Take(12).ToList(),
+            DirectCast(pinnedEntries, IList(Of AppEntry)))
+
+        Dim startY = 36
+        Dim x = 4
+        Dim y = startY
+        For i = 0 To entriesToShow.Count - 1
+            Dim cardRect = New Rectangle(x, y, CARD_W, CARD_H)
+            If cardRect.Contains(pt) Then Return (i, entriesToShow(i))
+            x += CARD_W + CARD_GAP
+            If x + CARD_W > LEFT_CONTENT_W Then
+                x = 4
+                y += CARD_H + CARD_GAP
+            End If
+        Next
+        Return (-1, Nothing)
+    End Function
+
+    Private Sub PinnedClick(sender As Object, e As MouseEventArgs)
+        Dim hit = GetPinnedEntryAt(e.Location)
+        If hit.Entry IsNot Nothing Then LaunchEntry(hit.Entry)
+    End Sub
+
+    Private Sub PinnedMouseMove(sender As Object, e As MouseEventArgs)
+        Dim hit = GetPinnedEntryAt(e.Location)
+        If hit.Index <> pinnedHoveredIdx Then
+            pinnedHoveredIdx = hit.Index
+            pnlPinned.Invalidate()
+        End If
+        pnlPinned.Cursor = If(hit.Index >= 0, Cursors.Hand, Cursors.Default)
+    End Sub
+
+    Private Sub PinnedMouseLeave(sender As Object, e As EventArgs)
+        If pinnedHoveredIdx >= 0 Then
+            pinnedHoveredIdx = -1
+            pnlPinned.Invalidate()
+        End If
+    End Sub
+
+    ' --- Categories mouse handling ---
+    Private Function GetCatEntryAt(pt As Point) As (Index As Integer, Entry As AppEntry)
+        Dim panelW = LEFT_CONTENT_W
+        Dim catBlockW = (CAT_CARD_W + 6) * 3 + 10
+        Dim curX = 4
+        Dim curY = 34
+        Dim rowH = CAT_CARD_H + 28
+        Dim catIdx = 0
+
+        For Each cat In categories
+            If curX > 4 AndAlso curX + catBlockW > panelW Then
+                curX = 4
+                curY += rowH
+            End If
+
+            Dim itemX = curX
+            Dim itemY = curY + 20
+            For Each entry In cat.Entries.Take(3)
+                Dim cardRect = New Rectangle(itemX, itemY, CAT_CARD_W, CAT_CARD_H)
+                If cardRect.Contains(pt) Then Return (catIdx, entry)
+                itemX += CAT_CARD_W + 6
+                catIdx += 1
+            Next
+
+            curX += catBlockW + 12
+        Next
+        Return (-1, Nothing)
+    End Function
+
+    Private Sub CategoriesClick(sender As Object, e As MouseEventArgs)
+        Dim hit = GetCatEntryAt(e.Location)
+        If hit.Entry IsNot Nothing Then LaunchEntry(hit.Entry)
+    End Sub
+
+    Private Sub CategoriesMouseMove(sender As Object, e As MouseEventArgs)
+        Dim hit = GetCatEntryAt(e.Location)
+        If hit.Index <> catHoveredIdx Then
+            catHoveredIdx = hit.Index
+            pnlCategories.Invalidate()
+        End If
+        pnlCategories.Cursor = If(hit.Index >= 0, Cursors.Hand, Cursors.Default)
+    End Sub
+
+    Private Sub CategoriesMouseLeave(sender As Object, e As EventArgs)
+        If catHoveredIdx >= 0 Then
+            catHoveredIdx = -1
+            pnlCategories.Invalidate()
+        End If
+    End Sub
+
+    ' --- All Apps mouse handling ---
+    Private Function GetAllAppsEntryAt(pt As Point) As (Index As Integer, Entry As AppEntry)
+        If pt.Y < 34 Then Return (-1, Nothing)
+        Dim query = txtSearch.Text.Trim()
+        Dim filtered = allEntries.Where(Function(a) String.IsNullOrEmpty(query) OrElse a.Name.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0).OrderBy(Function(a) a.Name).ToList()
+
+        Dim y = 34 - allAppsScrollOffset
+        Dim currentLetter As String = ""
+        For i = 0 To filtered.Count - 1
+            Dim entry = filtered(i)
+            Dim firstLetter = entry.Name.Substring(0, 1).ToUpper()
+            If Not Char.IsLetter(firstLetter(0)) Then firstLetter = "#"
+            If firstLetter <> currentLetter Then
+                currentLetter = firstLetter
+                y += ALLAPPS_LETTER_H
+            End If
+            Dim rowRect = New Rectangle(4, y, pnlAllApps.ClientSize.Width - 8, ALLAPPS_ROW_H)
+            If rowRect.Contains(pt) Then Return (i, entry)
+            y += ALLAPPS_ROW_H
+        Next
+        Return (-1, Nothing)
+    End Function
+
+    Private Sub AllAppsClick(sender As Object, e As MouseEventArgs)
+        Dim hit = GetAllAppsEntryAt(e.Location)
+        If hit.Entry IsNot Nothing Then LaunchEntry(hit.Entry)
+    End Sub
+
+    Private Sub AllAppsMouseMove(sender As Object, e As MouseEventArgs)
+        Dim hit = GetAllAppsEntryAt(e.Location)
+        If hit.Index <> allAppsHoveredIdx Then
+            allAppsHoveredIdx = hit.Index
+            pnlAllApps.Invalidate()
+        End If
+        pnlAllApps.Cursor = If(hit.Index >= 0, Cursors.Hand, Cursors.Default)
+    End Sub
+
+    Private Sub AllAppsMouseLeave(sender As Object, e As EventArgs)
+        If allAppsHoveredIdx >= 0 Then
+            allAppsHoveredIdx = -1
+            pnlAllApps.Invalidate()
+        End If
+    End Sub
+
+    Private Sub AllAppsWheel(sender As Object, e As MouseEventArgs)
+        allAppsScrollOffset -= e.Delta \ 4
+        allAppsScrollOffset = Math.Max(0, allAppsScrollOffset)
+        ' Clamp to content height
+        Dim totalHeight = EstimateAllAppsHeight()
+        Dim visibleH = pnlAllApps.ClientSize.Height - 34
+        allAppsScrollOffset = Math.Min(allAppsScrollOffset, Math.Max(0, totalHeight - visibleH))
+        pnlAllApps.Invalidate()
+    End Sub
+
+    Private Function EstimateAllAppsHeight() As Integer
+        Dim query = txtSearch.Text.Trim()
+        Dim filtered = allEntries.Where(Function(a) String.IsNullOrEmpty(query) OrElse a.Name.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0).OrderBy(Function(a) a.Name).ToList()
+        Dim h = 0
+        Dim currentLetter As String = ""
+        For Each entry In filtered
+            Dim firstLetter = entry.Name.Substring(0, 1).ToUpper()
+            If Not Char.IsLetter(firstLetter(0)) Then firstLetter = "#"
+            If firstLetter <> currentLetter Then
+                currentLetter = firstLetter
+                h += ALLAPPS_LETTER_H
+            End If
+            h += ALLAPPS_ROW_H
+        Next
+        Return h
+    End Function
+
+    ' --- User bar interaction ---
+    Private Sub UserBarClick(sender As Object, e As MouseEventArgs)
+        ' Mica toggle area
+        If e.X > pnlUserBar.Width - 160 AndAlso e.X < pnlUserBar.Width - 60 Then
+            ToggleMica()
+            Return
+        End If
+        ' Power button area (right side)
+        If e.X > pnlUserBar.Width - 60 Then
+            ' Show a simple power menu
+            Dim cm = New ContextMenuStrip()
+            cm.Items.Add("Sleep", Nothing, Sub(s, ev) Application.SetSuspendState(PowerState.Suspend, False, False))
+            cm.Items.Add("Shut down", Nothing, Sub(s, ev)
+                                                    Try : Process.Start("shutdown", "/s /t 0") : Catch : End Try
+                                                End Sub)
+            cm.Items.Add("Restart", Nothing, Sub(s, ev)
+                                                  Try : Process.Start("shutdown", "/r /t 0") : Catch : End Try
+                                              End Sub)
+            cm.Items.Add("Sign out", Nothing, Sub(s, ev)
+                                                   Try : Process.Start("logoff") : Catch : End Try
+                                               End Sub)
+            cm.Show(pnlUserBar, e.Location)
+        End If
+    End Sub
+#End Region
+
+    Private Sub ToggleMica()
+        micaEnabled = Not micaEnabled
+        If micaEnabled Then
+            ApplyMicaBackdrop()
+        Else
+            ' Disable Mica — set backdrop to none
+            micaApplied = False
+            Try
+                Dim backdropType As Integer = 1 ' DWMSBT_NONE / Auto
+                DwmSetWindowAttribute(Me.Handle, DWMWA_SYSTEMBACKDROP_TYPE, backdropType, 4)
+            Catch
+            End Try
+        End If
+        Me.Invalidate(True)
+        pnlUserBar.Invalidate()
+    End Sub
+
+    Private Sub InitializeComponent()
     End Sub
 End Class
