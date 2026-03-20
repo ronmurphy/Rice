@@ -527,11 +527,9 @@ Public Class Form1
     End Sub
 
     Private Sub Form1_Load(sender As Object, e As EventArgs) Handles Me.Load
+        ' Set native taskbar to auto-hide (releases its work area) then hide it
         TaskbarControl.HideTaskbar()
-        RemoveTaskbarReservation()
-        ExpandWorkAreaToFullScreen()
     End Sub
-
 
     Private Sub Form1_FormClosed(sender As Object, e As FormClosedEventArgs) Handles Me.FormClosed
         TaskbarControl.ShowTaskbar()
