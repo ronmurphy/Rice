@@ -45,6 +45,19 @@ Public Class frmStart
     Private Const WS_THICKFRAME As Integer = &H40000
     Private Const WM_NCCALCSIZE As Integer = &H83
     Private Const WM_NCHITTEST As Integer = &H84
+    Private Const GWL_STYLE As Integer = -16
+    Private Const SWP_FRAMECHANGED As UInteger = &H20
+    Private Const SWP_NOSIZE As UInteger = &H1
+    Private Const SWP_NOMOVE As UInteger = &H2
+    Private Const SWP_NOZORDER As UInteger = &H4
+
+    <DllImport("user32.dll")>
+    Private Shared Function GetWindowLong(hWnd As IntPtr, nIndex As Integer) As Integer
+    End Function
+
+    <DllImport("user32.dll")>
+    Private Shared Function SetWindowLong(hWnd As IntPtr, nIndex As Integer, dwNewLong As Integer) As Integer
+    End Function
 
     Private micaApplied As Boolean = False
     Private micaEnabled As Boolean = False  ' Off by default — user can toggle
@@ -134,6 +147,10 @@ Public Class frmStart
     Private pinnedHoveredIdx As Integer = -1
     Private catHoveredIdx As Integer = -1
     Private allAppsHoveredIdx As Integer = -1
+    Private expandedCategories As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+    Private hoveredCatHeader As String = Nothing
+    Private catScrollOffsets As New Dictionary(Of String, Integer)(StringComparer.OrdinalIgnoreCase)
+    Private Const CAT_MAX_EXPANDED_ROWS As Integer = 3  ' max visible rows when expanded before scrolling
 
     ' Layout constants
     Private Const FORM_WIDTH As Integer = 860
@@ -165,6 +182,8 @@ Public Class frmStart
     Private ReadOnly clrCardBg As Color = Color.FromArgb(120, 55, 55, 55)
     Private ReadOnly clrCardHover As Color = Color.FromArgb(160, 80, 80, 80)
     Private ReadOnly clrLetterBg As Color = Color.FromArgb(80, 96, 165, 250)
+    Private ReadOnly clrGroupBorder As Color = Color.FromArgb(50, 255, 255, 255)
+    Private ReadOnly clrGroupBg As Color = Color.FromArgb(40, 255, 255, 255)
 
     ' Pinned entries (max ~12)
     Private pinnedEntries As New List(Of AppEntry)()
@@ -229,9 +248,11 @@ Public Class frmStart
     Protected Overrides ReadOnly Property CreateParams As CreateParams
         Get
             Dim cp = MyBase.CreateParams
-            ' Always add WS_CAPTION so DWM can apply Mica when toggled on.
+            ' Only add WS_CAPTION when Mica is active — DWM needs it for backdrop.
             ' WM_NCCALCSIZE hides the title bar visually.
-            cp.Style = cp.Style Or WS_CAPTION
+            If micaEnabled Then
+                cp.Style = cp.Style Or WS_CAPTION
+            End If
             ' Reduce flicker
             cp.ExStyle = cp.ExStyle Or &H2000000 ' WS_EX_COMPOSITED
             Return cp
@@ -338,6 +359,7 @@ Public Class frmStart
         AddHandler pnlCategories.MouseClick, AddressOf CategoriesClick
         AddHandler pnlCategories.MouseMove, AddressOf CategoriesMouseMove
         AddHandler pnlCategories.MouseLeave, AddressOf CategoriesMouseLeave
+        ' Scrolling within expanded categories is handled by click on the scrollbar area
         pnlLeft.Controls.Add(pnlCategories)
 
         ' Pinned section at top (add LAST so it docks above categories)
@@ -776,7 +798,7 @@ Public Class frmStart
             OrderBy(Function(g) g.Key).ToList()
 
         For Each cg In catGroups
-            categories.Add((cg.Key, cg.Take(6).ToList()))
+            categories.Add((cg.Key, cg.ToList()))
         Next
     End Sub
 
@@ -968,33 +990,81 @@ Public Class frmStart
             End Using
         End Using
 
-        ' Draw category groups — each category is a titled row of cards
-        ' Categories flow left-to-right, wrapping to new row when out of space
         Dim panelW = LEFT_CONTENT_W
-        Dim catBlockW = (CAT_CARD_W + 6) * 3 + 10  ' width of one category block (3 cards + label)
+        Dim cols = 3
+        Dim cardSpacing = 6
+        Dim groupPad = 10  ' padding inside the group border
+        Dim headerH = 28   ' height for category header inside group
+        Dim collapsedBlockW = groupPad * 2 + cols * (CAT_CARD_W + cardSpacing) - cardSpacing
         Dim curX = 4
         Dim curY = 34
         Dim catIdx = 0
-        Dim rowH = CAT_CARD_H + 28  ' card height + label height + gaps
+        Dim maxBottom = curY
+        Dim rowMaxBottom = curY  ' tallest group in current row
 
         For Each cat In categories
-            ' Wrap to next row if this category won't fit
-            If curX > 4 AndAlso curX + catBlockW > panelW Then
-                curX = 4
-                curY += rowH
+            Dim hasChevron = (cat.Entries.Count > 3)
+            Dim isExpanded = hasChevron AndAlso expandedCategories.Contains(cat.Name)
+
+            ' Determine which entries are visible
+            Dim entriesToShow As List(Of AppEntry)
+            If Not hasChevron Then
+                ' 3 or fewer: always show all, no expand/collapse
+                entriesToShow = cat.Entries
+            ElseIf isExpanded Then
+                ' Expanded: show all but cap visible rows for scrolling
+                Dim scrollOff = 0
+                If catScrollOffsets.ContainsKey(cat.Name) Then scrollOff = catScrollOffsets(cat.Name)
+                Dim maxVisible = CAT_MAX_EXPANDED_ROWS * cols
+                entriesToShow = cat.Entries.Skip(scrollOff * cols).Take(maxVisible).ToList()
+            Else
+                ' Collapsed: show first row only
+                entriesToShow = cat.Entries.Take(cols).ToList()
             End If
 
-            ' Category title
-            Using fnt = New Font("Segoe UI", 9, FontStyle.Bold)
-                Using br = New SolidBrush(clrTextSecondary)
-                    g.DrawString(cat.Name.ToUpper(), fnt, br, curX, curY)
+            Dim entryRows = CInt(Math.Ceiling(entriesToShow.Count / CDbl(cols)))
+            Dim scrollBarH = 0
+            If isExpanded AndAlso cat.Entries.Count > CAT_MAX_EXPANDED_ROWS * cols Then
+                scrollBarH = 14  ' space for scroll indicator
+            End If
+            Dim groupH = groupPad + headerH + entryRows * (CAT_CARD_H + cardSpacing) - cardSpacing + groupPad + scrollBarH
+            Dim groupW = collapsedBlockW
+
+            ' Wrap to next row if this group won't fit
+            If curX > 4 AndAlso curX + groupW > panelW Then
+                curX = 4
+                curY = rowMaxBottom + 10
+                rowMaxBottom = curY
+            End If
+
+            ' Draw group border container
+            Dim groupRect = New Rectangle(curX, curY, groupW, groupH)
+            DrawRoundedBorder(g, groupRect, clrGroupBg, clrGroupBorder, 10)
+
+            ' Category header
+            Dim isHeaderHov = (hoveredCatHeader = cat.Name)
+            Using fnt = New Font("Segoe UI", 8.5F, FontStyle.Bold)
+                Dim headerColor = If(isHeaderHov AndAlso hasChevron, clrTextPrimary, clrTextSecondary)
+                Using br = New SolidBrush(headerColor)
+                    g.DrawString(cat.Name.ToUpper(), fnt, br, curX + groupPad, curY + groupPad)
                 End Using
+                ' Chevron indicator — only for categories with 4+ entries
+                If hasChevron Then
+                    Dim chevron = If(isExpanded, ChrW(&H25B2), ChrW(&H25BC)) ' up/down triangle
+                    Using br = New SolidBrush(clrTextSecondary)
+                        Using chevFnt = New Font("Segoe UI", 7)
+                            Dim chevX = curX + groupW - groupPad - 14
+                            g.DrawString(chevron, chevFnt, br, chevX, curY + groupPad + 2)
+                        End Using
+                    End Using
+                End If
             End Using
 
-            ' Category items in a row
-            Dim itemX = curX
-            Dim itemY = curY + 20
-            For Each entry In cat.Entries.Take(3)
+            ' Draw cards inside the group
+            Dim itemX = curX + groupPad
+            Dim itemY = curY + groupPad + headerH
+            Dim col = 0
+            For Each entry In entriesToShow
                 Dim cardRect = New Rectangle(itemX, itemY, CAT_CARD_W, CAT_CARD_H)
                 Dim isHov = (catHoveredIdx = catIdx)
 
@@ -1016,15 +1086,60 @@ Public Class frmStart
                     End Using
                 End Using
 
-                itemX += CAT_CARD_W + 6
+                col += 1
                 catIdx += 1
+                If col >= cols Then
+                    col = 0
+                    itemX = curX + groupPad
+                    itemY += CAT_CARD_H + cardSpacing
+                Else
+                    itemX += CAT_CARD_W + cardSpacing
+                End If
             Next
 
-            curX += catBlockW + 12
+            ' Draw scroll arrows for expanded categories with overflow
+            If isExpanded AndAlso cat.Entries.Count > CAT_MAX_EXPANDED_ROWS * cols Then
+                Dim scrollOff = 0
+                If catScrollOffsets.ContainsKey(cat.Name) Then scrollOff = catScrollOffsets(cat.Name)
+                Dim totalRows = CInt(Math.Ceiling(cat.Entries.Count / CDbl(cols)))
+                Dim maxScroll = Math.Max(0, totalRows - CAT_MAX_EXPANDED_ROWS)
+                Dim barY = curY + groupH - groupPad - 8
+
+                ' Left arrow (scroll up) and right arrow (scroll down)
+                Using arrowFnt = New Font("Segoe UI", 8, FontStyle.Bold)
+                    ' Left arrow
+                    Dim leftColor = If(scrollOff > 0, clrTextPrimary, Color.FromArgb(60, 255, 255, 255))
+                    Using br = New SolidBrush(leftColor)
+                        g.DrawString(ChrW(&H25C0), arrowFnt, br, curX + groupPad, barY) ' ◀
+                    End Using
+
+                    ' Page indicator: "2 / 5"
+                    Dim pageText = $"{scrollOff + 1} / {maxScroll + 1}"
+                    Using br = New SolidBrush(clrTextSecondary)
+                        Using sf = New StringFormat() With {.Alignment = StringAlignment.Center}
+                            g.DrawString(pageText, arrowFnt, br, New RectangleF(curX, barY, groupW, 14), sf)
+                        End Using
+                    End Using
+
+                    ' Right arrow
+                    Dim rightColor = If(scrollOff < maxScroll, clrTextPrimary, Color.FromArgb(60, 255, 255, 255))
+                    Using br = New SolidBrush(rightColor)
+                        Dim rightX = curX + groupW - groupPad - 12
+                        g.DrawString(ChrW(&H25B6), arrowFnt, br, rightX, barY) ' ▶
+                    End Using
+                End Using
+            End If
+
+            ' Track the bottom of this group for panel sizing
+            Dim thisBottom = curY + groupH
+            If thisBottom > rowMaxBottom Then rowMaxBottom = thisBottom
+            If thisBottom > maxBottom Then maxBottom = thisBottom
+
+            curX += groupW + 10
         Next
 
-        ' Auto-size the panel height based on what we actually drew
-        Dim neededH = curY + rowH + 10
+        ' Auto-size the panel height
+        Dim neededH = maxBottom + 10
         If pnlCategories.Height <> neededH Then
             pnlCategories.Height = neededH
         End If
@@ -1102,14 +1217,31 @@ Public Class frmStart
     End Sub
 
     Private Sub DrawRoundedCard(g As Graphics, rect As Rectangle, fillColor As Color, radius As Integer)
-        Using path = New GraphicsPath()
-            path.AddArc(rect.X, rect.Y, radius * 2, radius * 2, 180, 90)
-            path.AddArc(rect.Right - radius * 2, rect.Y, radius * 2, radius * 2, 270, 90)
-            path.AddArc(rect.Right - radius * 2, rect.Bottom - radius * 2, radius * 2, radius * 2, 0, 90)
-            path.AddArc(rect.X, rect.Bottom - radius * 2, radius * 2, radius * 2, 90, 90)
-            path.CloseFigure()
+        Using path = MakeRoundedPath(rect, radius)
             Using br = New SolidBrush(fillColor)
                 g.FillPath(br, path)
+            End Using
+        End Using
+    End Sub
+
+    Private Function MakeRoundedPath(rect As Rectangle, radius As Integer) As GraphicsPath
+        Dim path = New GraphicsPath()
+        Dim d = radius * 2
+        path.AddArc(rect.X, rect.Y, d, d, 180, 90)
+        path.AddArc(rect.Right - d, rect.Y, d, d, 270, 90)
+        path.AddArc(rect.Right - d, rect.Bottom - d, d, d, 0, 90)
+        path.AddArc(rect.X, rect.Bottom - d, d, d, 90, 90)
+        path.CloseFigure()
+        Return path
+    End Function
+
+    Private Sub DrawRoundedBorder(g As Graphics, rect As Rectangle, fillColor As Color, borderColor As Color, radius As Integer)
+        Using path = MakeRoundedPath(rect, radius)
+            Using br = New SolidBrush(fillColor)
+                g.FillPath(br, path)
+            End Using
+            Using pn = New Pen(borderColor, 1)
+                g.DrawPath(pn, path)
             End Using
         End Using
     End Sub
@@ -1176,53 +1308,166 @@ Public Class frmStart
     End Sub
 
     ' --- Categories mouse handling ---
-    Private Function GetCatEntryAt(pt As Point) As (Index As Integer, Entry As AppEntry)
+    Private Const CAT_COLS As Integer = 3
+    Private Const CAT_GROUP_PAD As Integer = 10
+    Private Const CAT_HEADER_H As Integer = 28
+
+    Private Function GetCatGroupLayout() As List(Of (Name As String, Rect As Rectangle, HeaderRect As Rectangle, Entries As List(Of AppEntry)))
+        Dim result As New List(Of (Name As String, Rect As Rectangle, HeaderRect As Rectangle, Entries As List(Of AppEntry)))()
         Dim panelW = LEFT_CONTENT_W
-        Dim catBlockW = (CAT_CARD_W + 6) * 3 + 10
+        Dim cardSpacing = 6
+        Dim groupW = CAT_GROUP_PAD * 2 + CAT_COLS * (CAT_CARD_W + cardSpacing) - cardSpacing
         Dim curX = 4
         Dim curY = 34
-        Dim rowH = CAT_CARD_H + 28
-        Dim catIdx = 0
+        Dim rowMaxBottom = curY
 
         For Each cat In categories
-            If curX > 4 AndAlso curX + catBlockW > panelW Then
-                curX = 4
-                curY += rowH
+            Dim hasChevron = (cat.Entries.Count > 3)
+            Dim isExpanded = hasChevron AndAlso expandedCategories.Contains(cat.Name)
+
+            Dim entriesToShow As List(Of AppEntry)
+            If Not hasChevron Then
+                entriesToShow = cat.Entries
+            ElseIf isExpanded Then
+                Dim scrollOff = 0
+                If catScrollOffsets.ContainsKey(cat.Name) Then scrollOff = catScrollOffsets(cat.Name)
+                Dim maxVisible = CAT_MAX_EXPANDED_ROWS * CAT_COLS
+                entriesToShow = cat.Entries.Skip(scrollOff * CAT_COLS).Take(maxVisible).ToList()
+            Else
+                entriesToShow = cat.Entries.Take(CAT_COLS).ToList()
             End If
 
-            Dim itemX = curX
-            Dim itemY = curY + 20
-            For Each entry In cat.Entries.Take(3)
-                Dim cardRect = New Rectangle(itemX, itemY, CAT_CARD_W, CAT_CARD_H)
-                If cardRect.Contains(pt) Then Return (catIdx, entry)
-                itemX += CAT_CARD_W + 6
-                catIdx += 1
-            Next
+            Dim entryRows = CInt(Math.Ceiling(entriesToShow.Count / CDbl(CAT_COLS)))
+            Dim scrollBarH = 0
+            If isExpanded AndAlso cat.Entries.Count > CAT_MAX_EXPANDED_ROWS * CAT_COLS Then
+                scrollBarH = 14
+            End If
+            Dim groupH = CAT_GROUP_PAD + CAT_HEADER_H + entryRows * (CAT_CARD_H + cardSpacing) - cardSpacing + CAT_GROUP_PAD + scrollBarH
 
-            curX += catBlockW + 12
+            If curX > 4 AndAlso curX + groupW > panelW Then
+                curX = 4
+                curY = rowMaxBottom + 10
+                rowMaxBottom = curY
+            End If
+
+            Dim groupRect = New Rectangle(curX, curY, groupW, groupH)
+            Dim headerRect = New Rectangle(curX, curY, groupW, CAT_GROUP_PAD + CAT_HEADER_H)
+            result.Add((cat.Name, groupRect, headerRect, entriesToShow))
+
+            If curY + groupH > rowMaxBottom Then rowMaxBottom = curY + groupH
+            curX += groupW + 10
         Next
-        Return (-1, Nothing)
+        Return result
+    End Function
+
+    Private Function GetCatEntryAt(pt As Point) As (Index As Integer, Entry As AppEntry, HeaderName As String)
+        Dim layout = GetCatGroupLayout()
+        Dim catIdx = 0
+        Dim cardSpacing = 6
+
+        For Each grp In layout
+            ' Check if clicking on the header area
+            If grp.HeaderRect.Contains(pt) Then
+                Return (-1, Nothing, grp.Name)
+            End If
+
+            ' Check individual cards
+            Dim itemX = grp.Rect.X + CAT_GROUP_PAD
+            Dim itemY = grp.Rect.Y + CAT_GROUP_PAD + CAT_HEADER_H
+            Dim col = 0
+            For Each entry In grp.Entries
+                Dim cardRect = New Rectangle(itemX, itemY, CAT_CARD_W, CAT_CARD_H)
+                If cardRect.Contains(pt) Then Return (catIdx, entry, Nothing)
+                col += 1
+                catIdx += 1
+                If col >= CAT_COLS Then
+                    col = 0
+                    itemX = grp.Rect.X + CAT_GROUP_PAD
+                    itemY += CAT_CARD_H + cardSpacing
+                Else
+                    itemX += CAT_CARD_W + cardSpacing
+                End If
+            Next
+        Next
+        Return (-1, Nothing, Nothing)
     End Function
 
     Private Sub CategoriesClick(sender As Object, e As MouseEventArgs)
+        ' Check if clicking the scrollbar area of an expanded category
+        Dim layout = GetCatGroupLayout()
+        For Each grp In layout
+            If Not grp.Rect.Contains(e.Location) Then Continue For
+            Dim cat = categories.FirstOrDefault(Function(c) c.Name = grp.Name)
+            If cat.Entries IsNot Nothing AndAlso cat.Entries.Count > CAT_MAX_EXPANDED_ROWS * CAT_COLS AndAlso expandedCategories.Contains(grp.Name) Then
+                ' Check if click is in the scrollbar area (bottom 14px of group)
+                Dim scrollBarY = grp.Rect.Bottom - CAT_GROUP_PAD - 4
+                If e.Y >= scrollBarY AndAlso e.Y <= grp.Rect.Bottom Then
+                    Dim scrollOff = 0
+                    If catScrollOffsets.ContainsKey(grp.Name) Then scrollOff = catScrollOffsets(grp.Name)
+                    Dim totalRows = CInt(Math.Ceiling(cat.Entries.Count / CDbl(CAT_COLS)))
+                    Dim maxScroll = Math.Max(0, totalRows - CAT_MAX_EXPANDED_ROWS)
+
+                    ' Click left half = scroll up, right half = scroll down
+                    Dim midX = grp.Rect.X + grp.Rect.Width \ 2
+                    If e.X < midX Then
+                        scrollOff = Math.Max(0, scrollOff - 1)
+                    Else
+                        scrollOff = Math.Min(maxScroll, scrollOff + 1)
+                    End If
+                    catScrollOffsets(grp.Name) = scrollOff
+                    pnlCategories.Invalidate()
+                    Return
+                End If
+            End If
+        Next
+
         Dim hit = GetCatEntryAt(e.Location)
+        ' Clicking a header toggles expand/collapse — only for categories with 4+ entries
+        If hit.HeaderName IsNot Nothing Then
+            Dim cat = categories.FirstOrDefault(Function(c) c.Name = hit.HeaderName)
+            If cat.Entries IsNot Nothing AndAlso cat.Entries.Count > 3 Then
+                If expandedCategories.Contains(hit.HeaderName) Then
+                    expandedCategories.Remove(hit.HeaderName)
+                    catScrollOffsets.Remove(hit.HeaderName)
+                Else
+                    expandedCategories.Add(hit.HeaderName)
+                End If
+                pnlCategories.Invalidate()
+            End If
+            Return
+        End If
         If hit.Entry IsNot Nothing Then LaunchEntry(hit.Entry)
     End Sub
 
     Private Sub CategoriesMouseMove(sender As Object, e As MouseEventArgs)
         Dim hit = GetCatEntryAt(e.Location)
+        Dim needRepaint = False
+
         If hit.Index <> catHoveredIdx Then
             catHoveredIdx = hit.Index
-            pnlCategories.Invalidate()
+            needRepaint = True
         End If
-        pnlCategories.Cursor = If(hit.Index >= 0, Cursors.Hand, Cursors.Default)
+
+        Dim newHeaderHov = hit.HeaderName
+        If newHeaderHov <> hoveredCatHeader Then
+            hoveredCatHeader = newHeaderHov
+            needRepaint = True
+        End If
+
+        If needRepaint Then pnlCategories.Invalidate()
+        Dim showHand = hit.Index >= 0
+        If hit.HeaderName IsNot Nothing Then
+            Dim cat = categories.FirstOrDefault(Function(c) c.Name = hit.HeaderName)
+            If cat.Entries IsNot Nothing AndAlso cat.Entries.Count > 3 Then showHand = True
+        End If
+        pnlCategories.Cursor = If(showHand, Cursors.Hand, Cursors.Default)
     End Sub
 
     Private Sub CategoriesMouseLeave(sender As Object, e As EventArgs)
-        If catHoveredIdx >= 0 Then
-            catHoveredIdx = -1
-            pnlCategories.Invalidate()
-        End If
+        Dim needRepaint = (catHoveredIdx >= 0 OrElse hoveredCatHeader IsNot Nothing)
+        catHoveredIdx = -1
+        hoveredCatHeader = Nothing
+        If needRepaint Then pnlCategories.Invalidate()
     End Sub
 
     ' --- All Apps mouse handling ---
@@ -1376,6 +1621,10 @@ Public Class frmStart
     Private Sub ToggleMica()
         micaEnabled = Not micaEnabled
         If micaEnabled Then
+            ' Add WS_CAPTION so DWM can render the backdrop
+            Dim style = GetWindowLong(Me.Handle, GWL_STYLE)
+            SetWindowLong(Me.Handle, GWL_STYLE, style Or WS_CAPTION)
+            SetWindowPos(Me.Handle, IntPtr.Zero, 0, 0, 0, 0, SWP_NOSIZE Or SWP_NOMOVE Or SWP_NOZORDER Or SWP_FRAMECHANGED)
             ApplyMicaBackdrop()
         Else
             ' Disable Mica
@@ -1392,6 +1641,11 @@ Public Class frmStart
                 ' Retract DWM frame so it stops being see-through
                 Dim m As New MARGINS() With {.Left = 0, .Right = 0, .Top = 0, .Bottom = 0}
                 DwmExtendFrameIntoClientArea(Me.Handle, m)
+
+                ' Remove WS_CAPTION so DWM stops managing the frame
+                Dim style = GetWindowLong(Me.Handle, GWL_STYLE)
+                SetWindowLong(Me.Handle, GWL_STYLE, style And Not WS_CAPTION)
+                SetWindowPos(Me.Handle, IntPtr.Zero, 0, 0, 0, 0, SWP_NOSIZE Or SWP_NOMOVE Or SWP_NOZORDER Or SWP_FRAMECHANGED)
             Catch
             End Try
         End If
