@@ -6,6 +6,7 @@ Imports System.Drawing.Drawing2D
 Imports System.Drawing.Imaging
 Imports System.Drawing.Text
 
+
 Public Class frmStart
     Inherits Form
 
@@ -73,6 +74,21 @@ Public Class frmStart
     <DllImport("gdi32.dll")>
     Private Shared Function DeleteObject(hObject As IntPtr) As <MarshalAs(UnmanagedType.Bool)> Boolean
     End Function
+
+    <Flags>
+    Public Enum SIIGBF As Integer
+        RESIZETOFIT = &H0
+        BIGGERSIZEOK = &H1
+        MEMORYONLY = &H2
+        ICONONLY = &H4
+        THUMBNAILONLY = &H8
+        INCACHEONLY = &H10
+        SCALEUP = &H100 ' Essential for Jumbo quality
+    End Enum
+
+
+
+
 #End Region
 
 #Region "Data model"
@@ -444,40 +460,106 @@ Public Class frmStart
         Next
     End Sub
 
+    'Private Sub LoadEntryIcon(entry As AppEntry)
+    '    If imgDict.ContainsKey(entry.Key) Then Return
+    '    Try
+    '        ' 1) Try exe path directly
+    '        If File.Exists(entry.Key) Then
+    '            Dim ico = Icon.ExtractAssociatedIcon(entry.Key)
+    '            If ico IsNot Nothing Then
+    '                imgDict(entry.Key) = ResizeIcon(ico.ToBitmap())
+    '                Return
+    '            End If
+    '        End If
+    '        ' 2) Try shortcut file
+    '        If Not String.IsNullOrEmpty(entry.ShortcutPath) AndAlso entry.ShortcutPath.EndsWith(".lnk", StringComparison.OrdinalIgnoreCase) AndAlso File.Exists(entry.ShortcutPath) Then
+    '            Dim ico = Icon.ExtractAssociatedIcon(entry.ShortcutPath)
+    '            If ico IsNot Nothing Then
+    '                imgDict(entry.Key) = ResizeIcon(ico.ToBitmap())
+    '                Return
+    '            End If
+    '        End If
+    '        ' 3) Shell image factory (UWP/Store)
+    '        Dim parsingName As String = Nothing
+    '        If Not String.IsNullOrEmpty(entry.ShortcutPath) AndAlso entry.ShortcutPath.StartsWith("shell:AppsFolder", StringComparison.OrdinalIgnoreCase) Then
+    '            parsingName = entry.ShortcutPath
+    '        Else
+    '            parsingName = "shell:AppsFolder\" & entry.Key
+    '        End If
+    '        Dim bmpShell = GetShellIconBitmap(parsingName, LARGE_ICON_SIZE)
+    '        If bmpShell IsNot Nothing Then
+    '            imgDict(entry.Key) = bmpShell
+    '            Return
+    '        End If
+    '    Catch
+    '    End Try
+    '    ' Fallback placeholder
+    '    imgDict(entry.Key) = CreatePlaceholder(entry.Name)
+    'End
+    '
+    'Private Sub LoadEntryIcon(entry As AppEntry)
+    '    If imgDict.ContainsKey(entry.Key) Then Return
+
+    '    ' Unified path: Try Shell Image Factory first (works for EXE, LNK, and UWP)
+    '    Dim parsingName As String = ""
+    '    If entry.ShortcutPath.StartsWith("shell:", StringComparison.OrdinalIgnoreCase) Then
+    '        parsingName = entry.ShortcutPath
+    '    ElseIf File.Exists(entry.ShortcutPath) Then
+    '        parsingName = entry.ShortcutPath
+    '    ElseIf File.Exists(entry.Key) Then
+    '        parsingName = entry.Key
+    '    End If
+
+    '    If Not String.IsNullOrEmpty(parsingName) Then
+    '        ' Request BIGGERSIZEOK and SCALEUP for the best quality
+    '        Dim bmpShell = GetShellIconBitmap(parsingName, LARGE_ICON_SIZE, SIIGBF.BIGGERSIZEOK Or SIIGBF.SCALEUP)
+    '        If bmpShell IsNot Nothing Then
+    '            imgDict(entry.Key) = bmpShell
+    '            Return
+    '        End If
+    '    End If
+
+    '    ' Fallback to your custom placeholder
+    '    imgDict(entry.Key) = CreatePlaceholder(entry.Name)
+    'End Sub
+
     Private Sub LoadEntryIcon(entry As AppEntry)
         If imgDict.ContainsKey(entry.Key) Then Return
-        Try
-            ' 1) Try exe path directly
-            If File.Exists(entry.Key) Then
-                Dim ico = Icon.ExtractAssociatedIcon(entry.Key)
-                If ico IsNot Nothing Then
-                    imgDict(entry.Key) = ResizeIcon(ico.ToBitmap())
-                    Return
-                End If
-            End If
-            ' 2) Try shortcut file
-            If Not String.IsNullOrEmpty(entry.ShortcutPath) AndAlso entry.ShortcutPath.EndsWith(".lnk", StringComparison.OrdinalIgnoreCase) AndAlso File.Exists(entry.ShortcutPath) Then
-                Dim ico = Icon.ExtractAssociatedIcon(entry.ShortcutPath)
-                If ico IsNot Nothing Then
-                    imgDict(entry.Key) = ResizeIcon(ico.ToBitmap())
-                    Return
-                End If
-            End If
-            ' 3) Shell image factory (UWP/Store)
-            Dim parsingName As String = Nothing
-            If Not String.IsNullOrEmpty(entry.ShortcutPath) AndAlso entry.ShortcutPath.StartsWith("shell:AppsFolder", StringComparison.OrdinalIgnoreCase) Then
-                parsingName = entry.ShortcutPath
-            Else
+
+        Dim parsingName As String = ""
+
+        ' 1) Prioritize existing shell: paths (already formatted)
+        If Not String.IsNullOrEmpty(entry.ShortcutPath) AndAlso entry.ShortcutPath.StartsWith("shell:", StringComparison.OrdinalIgnoreCase) Then
+            parsingName = entry.ShortcutPath
+
+            ' 2) Check for physical .lnk shortcuts
+        ElseIf Not String.IsNullOrEmpty(entry.ShortcutPath) AndAlso File.Exists(entry.ShortcutPath) Then
+            parsingName = entry.ShortcutPath
+
+            ' 3) Check for direct EXE paths
+        ElseIf File.Exists(entry.Key) Then
+            parsingName = entry.Key
+
+            ' 4) Final fallback for UWP/Store apps that only provide an AUMID (App User Model ID)
+            ' This handles cases where entry.Key is something like "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"
+        Else
+            If Not String.IsNullOrEmpty(entry.Key) Then
                 parsingName = "shell:AppsFolder\" & entry.Key
             End If
-            Dim bmpShell = GetShellIconBitmap(parsingName, LARGE_ICON_SIZE)
+        End If
+
+        ' Now try to extract the high-quality icon using the factory
+        If Not String.IsNullOrEmpty(parsingName) Then
+            ' We use SCALEUP and BIGGERSIZEOK to ensure we get 256px or the closest match
+            Dim bmpShell = GetShellIconBitmap(parsingName, LARGE_ICON_SIZE, SIIGBF.BIGGERSIZEOK Or SIIGBF.SCALEUP)
+
             If bmpShell IsNot Nothing Then
                 imgDict(entry.Key) = bmpShell
                 Return
             End If
-        Catch
-        End Try
-        ' Fallback placeholder
+        End If
+
+        ' Fallback to your custom designer-style placeholder if the factory fails
         imgDict(entry.Key) = CreatePlaceholder(entry.Name)
     End Sub
 
@@ -511,36 +593,65 @@ Public Class frmStart
         Return bmp
     End Function
 
-    Private Function GetShellIconBitmap(parsingName As String, size As Integer) As Bitmap
+    Private Function HBitmapToBitmapAlpha(hbm As IntPtr) As Bitmap
+        Dim bmp As Bitmap = Nothing
+
+        Using temp As Image = Image.FromHbitmap(hbm)
+            ' Force GDI+ to preserve alpha by saving as PNG to memory
+            Using ms As New MemoryStream()
+                temp.Save(ms, ImageFormat.Png)
+                ms.Position = 0
+                bmp = New Bitmap(ms)
+            End Using
+        End Using
+
+        Return bmp
+    End Function
+
+
+    Private Function GetShellIconBitmap(parsingName As String, size As Integer, flags As SIIGBF) As Bitmap
         Try
-            Dim iid As New Guid("bcc18b79-ba16-442f-80c4-8a59c30c463b")
+            Dim iid As New Guid("43826d1e-e718-42ee-bc55-a1e261c37bfe") ' IShellItem
             Dim pUnk As IntPtr = IntPtr.Zero
             Dim hr = SHCreateItemFromParsingName(parsingName, IntPtr.Zero, iid, pUnk)
-            If hr <> 0 OrElse pUnk = IntPtr.Zero Then Return Nothing
+            If hr <> 0 Then Return Nothing
 
-            Dim factory = CType(Marshal.GetObjectForIUnknown(pUnk), IShellItemImageFactory)
+            Dim factory = TryCast(Marshal.GetObjectForIUnknown(pUnk), IShellItemImageFactory)
             Marshal.Release(pUnk)
+            If factory Is Nothing Then Return Nothing
 
             Dim hbm As IntPtr = IntPtr.Zero
-            Dim s As New SHSIZE(size, size)
-            Dim res = factory.GetImage(s, 0UI, hbm)
+            ' Use the SIIGBF.ICONONLY flag if you don't want folder thumbnails
+            Dim res = factory.GetImage(New SHSIZE(size, size), flags Or SIIGBF.ICONONLY, hbm)
+
             If res = 0 AndAlso hbm <> IntPtr.Zero Then
                 Try
-                    Dim raw = Bitmap.FromHbitmap(hbm)
-                    Dim copy = New Bitmap(raw.Width, raw.Height, PixelFormat.Format32bppPArgb)
-                    Using g = Graphics.FromImage(copy)
-                        g.DrawImage(raw, 0, 0, copy.Width, copy.Height)
-                    End Using
-                    raw.Dispose()
-                    Return copy
+                    ' FIX: Instead of FromHbitmap, we use this to preserve Alpha
+                    'Dim raw = Image.FromHbitmap(hbm)
+                    'Dim result = New Bitmap(raw.Width, raw.Height, PixelFormat.Format32bppPArgb)
+
+                    'Using g = Graphics.FromImage(result)
+                    '    g.Clear(Color.Transparent)
+                    '    g.InterpolationMode = InterpolationMode.HighQualityBicubic
+                    '    g.DrawImage(raw, 0, 0, size, size)
+                    'End Using
+
+                    'raw.Dispose()
+                    'Return result
+
+                    Dim result = HBitmapToBitmapAlpha(hbm)
+                    Return result
                 Finally
                     DeleteObject(hbm)
                 End Try
             End If
-        Catch
+        Catch ex As Exception
+            Debug.WriteLine("Icon Error: " & ex.Message)
         End Try
         Return Nothing
     End Function
+
+
 
     Private Function CategorizeApp(entry As AppEntry) As String
         Dim n = entry.Name.ToLowerInvariant()
@@ -1213,5 +1324,9 @@ Public Class frmStart
     End Sub
 
     Private Sub InitializeComponent()
+    End Sub
+
+    Private Sub frmStart_Load(sender As Object, e As EventArgs) Handles Me.Load
+
     End Sub
 End Class
