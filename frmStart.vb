@@ -75,6 +75,21 @@ Public Class frmStart
     Private Shared Function DeleteObject(hObject As IntPtr) As <MarshalAs(UnmanagedType.Bool)> Boolean
     End Function
 
+    <DllImport("gdi32.dll", EntryPoint:="GetObjectW")>
+    Private Shared Function GetBitmapObject(hObject As IntPtr, nCount As Integer, ByRef lpObject As BITMAPINFO_NATIVE) As Integer
+    End Function
+
+    <StructLayout(LayoutKind.Sequential)>
+    Private Structure BITMAPINFO_NATIVE
+        Public bmType As Integer
+        Public bmWidth As Integer
+        Public bmHeight As Integer
+        Public bmWidthBytes As Integer
+        Public bmPlanes As Short
+        Public bmBitsPixel As Short
+        Public bmBits As IntPtr
+    End Structure
+
     <Flags>
     Public Enum SIIGBF As Integer
         RESIZETOFIT = &H0
@@ -138,6 +153,8 @@ Public Class frmStart
 
     ' Colors
     Private ReadOnly clrBackground As Color = Color.FromArgb(220, 32, 32, 32)
+    'Private ReadOnly clrBackground As Color = Color.FromArgb(220, 30, 80, 180) ' for debugging
+
     Private ReadOnly clrSurface As Color = Color.FromArgb(180, 48, 48, 48)
     Private ReadOnly clrSurfaceHover As Color = Color.FromArgb(200, 70, 70, 70)
     Private ReadOnly clrAccent As Color = Color.FromArgb(255, 96, 165, 250)
@@ -594,19 +611,43 @@ Public Class frmStart
     End Function
 
     Private Function HBitmapToBitmapAlpha(hbm As IntPtr) As Bitmap
-        Dim bmp As Bitmap = Nothing
+        ' Image.FromHbitmap() strips alpha — we MUST read raw DIB pixels directly.
+        Dim bm As New BITMAPINFO_NATIVE()
+        Dim cb = GetBitmapObject(hbm, Marshal.SizeOf(GetType(BITMAPINFO_NATIVE)), bm)
 
-        Using temp As Image = Image.FromHbitmap(hbm)
-            ' Force GDI+ to preserve alpha by saving as PNG to memory
-            Using ms As New MemoryStream()
-                temp.Save(ms, ImageFormat.Png)
-                ms.Position = 0
-                bmp = New Bitmap(ms)
-            End Using
-        End Using
+        If cb = 0 OrElse bm.bmBits = IntPtr.Zero OrElse bm.bmBitsPixel <> 32 Then
+            ' Not a 32bpp DIB section — fall back (will lose alpha, but at least won't crash)
+            Return Bitmap.FromHbitmap(hbm)
+        End If
 
-        Return bmp
+        Dim w = bm.bmWidth
+        Dim h = bm.bmHeight
+
+        ' Create a managed bitmap with premultiplied alpha format
+        Dim result As New Bitmap(w, h, PixelFormat.Format32bppPArgb)
+
+        ' Lock the managed bitmap so we can copy raw pixels into it
+        Dim lockRect As New Rectangle(0, 0, w, h)
+        Dim bmpData = result.LockBits(lockRect, ImageLockMode.WriteOnly, PixelFormat.Format32bppPArgb)
+
+        ' The DIB from Shell is bottom-up (first row in memory = bottom of image).
+        ' GDI+ Bitmap is top-down (first row in memory = top of image).
+        ' We must flip rows during copy.
+        Dim srcStride = w * 4
+        For row = 0 To h - 1
+            Dim srcRow = bm.bmBits + (h - 1 - row) * srcStride   ' bottom-up source
+            Dim dstRow = bmpData.Scan0 + row * bmpData.Stride     ' top-down destination
+            CopyMemory(dstRow, srcRow, srcStride)
+        Next
+
+        result.UnlockBits(bmpData)
+        Return result
     End Function
+
+    ' Fast memory copy for pixel data
+    <DllImport("kernel32.dll", EntryPoint:="RtlMoveMemory")>
+    Private Shared Sub CopyMemory(dest As IntPtr, src As IntPtr, byteCount As Integer)
+    End Sub
 
 
     Private Function GetShellIconBitmap(parsingName As String, size As Integer, flags As SIIGBF) As Bitmap
