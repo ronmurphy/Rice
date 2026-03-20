@@ -58,6 +58,8 @@ Public Class Form1
     Private Const EVENT_SYSTEM_FOREGROUND As UInteger = &H3
     Private Const WINEVENT_OUTOFCONTEXT As UInteger = 0
 
+    Private TaskbarControl As New TaskbarControl()
+
     <DllImport("user32.dll")>
     Private Shared Function SetWinEventHook(eventMin As UInteger, eventMax As UInteger, hmodWinEventProc As IntPtr, callback As WinEventDelegate, idProcess As UInteger, idThread As UInteger, dwFlags As UInteger) As IntPtr
     End Function
@@ -65,6 +67,7 @@ Public Class Form1
     <DllImport("user32.dll")>
     Private Shared Function UnhookWinEvent(hWinEventHook As IntPtr) As Boolean
     End Function
+
 
 
     Private Sub Form1_Shown(sender As Object, e As EventArgs) Handles MyBase.Shown
@@ -397,6 +400,7 @@ Public Class Form1
         trayToolTip.Dispose()
 
         UnregisterAppBar()
+
     End Sub
 
     Private Sub RegisterAppBar()
@@ -522,4 +526,14 @@ Public Class Form1
         End If
     End Sub
 
+    Private Sub Form1_Load(sender As Object, e As EventArgs) Handles Me.Load
+        TaskbarControl.HideTaskbar()
+        RemoveTaskbarReservation()
+        ExpandWorkAreaToFullScreen()
+    End Sub
+
+
+    Private Sub Form1_FormClosed(sender As Object, e As FormClosedEventArgs) Handles Me.FormClosed
+        TaskbarControl.ShowTaskbar()
+    End Sub
 End Class

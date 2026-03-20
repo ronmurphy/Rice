@@ -241,7 +241,6 @@ Public Class frmStart
         }
         AddHandler pnlUserBar.Paint, AddressOf PaintUserBar
         AddHandler pnlUserBar.MouseClick, AddressOf UserBarClick
-        Me.Controls.Add(pnlUserBar)
 
         ' Search box inside user bar — we overlay it
         txtSearch = New TextBox() With {
@@ -262,7 +261,11 @@ Public Class frmStart
             .BackColor = Color.Transparent,
             .Padding = New Padding(0)
         }
+
+        ' Add Fill panel FIRST, then Top panel — WinForms docks higher Z-order first,
+        ' so pnlUserBar (added last) claims its 56px at top, then pnlMain fills the rest.
         Me.Controls.Add(pnlMain)
+        Me.Controls.Add(pnlUserBar)
 
         ' All Apps panel on the right
         pnlAllApps = New Panel() With {
@@ -275,6 +278,7 @@ Public Class frmStart
         AddHandler pnlAllApps.MouseMove, AddressOf AllAppsMouseMove
         AddHandler pnlAllApps.MouseLeave, AddressOf AllAppsMouseLeave
         AddHandler pnlAllApps.MouseWheel, AddressOf AllAppsWheel
+        AddHandler pnlAllApps.MouseUp, AddressOf AllAppsRightClick
         pnlMain.Controls.Add(pnlAllApps)
 
         ' Divider line
@@ -1115,6 +1119,50 @@ Public Class frmStart
         Return h
     End Function
 
+    ' --- All Apps right-click context menu ---
+    Private Sub AllAppsRightClick(sender As Object, e As MouseEventArgs)
+        If e.Button <> MouseButtons.Right Then Return
+        Dim hit = GetAllAppsEntryAt(e.Location)
+        If hit.Entry Is Nothing Then Return
+
+        Dim entry = hit.Entry
+        Dim cm = New ContextMenuStrip()
+        '    cm.Renderer = New ToolStripProfessionalRenderer(New DarkColorTable())
+
+        Dim isPinned = pinnedEntries.Any(Function(p) p.Key = entry.Key)
+        If isPinned Then
+            cm.Items.Add("Unpin from Start", Nothing, Sub(s, ev)
+                                                           pinnedEntries.RemoveAll(Function(p) p.Key = entry.Key)
+                                                           RebuildPinnedHeight()
+                                                           pnlPinned.Invalidate()
+                                                       End Sub)
+        Else
+            cm.Items.Add("Pin to Start", Nothing, Sub(s, ev)
+                                                       If pinnedEntries.Count < 18 Then
+                                                           pinnedEntries.Add(entry)
+                                                           RebuildPinnedHeight()
+                                                           pnlPinned.Invalidate()
+                                                       End If
+                                                   End Sub)
+        End If
+
+        cm.Items.Add("Open", Nothing, Sub(s, ev) LaunchEntry(entry))
+        cm.Items.Add("Open file location", Nothing, Sub(s, ev)
+                                                         If Not String.IsNullOrEmpty(entry.ShortcutPath) AndAlso IO.File.Exists(entry.ShortcutPath) Then
+                                                             Process.Start("explorer.exe", "/select,""" & entry.ShortcutPath & """")
+                                                         End If
+                                                     End Sub)
+
+        cm.Show(pnlAllApps, e.Location)
+    End Sub
+
+    Private Sub RebuildPinnedHeight()
+        ' Recalculate the pinned panel height based on how many entries there are
+        Dim rows = Math.Max(1, CInt(Math.Ceiling(pinnedEntries.Count / Math.Floor(LEFT_CONTENT_W / (CARD_W + CARD_GAP)))))
+        Dim neededH = 36 + rows * (CARD_H + CARD_GAP) + 10
+        If neededH <> pnlPinned.Height Then pnlPinned.Height = neededH
+    End Sub
+
     ' --- User bar interaction ---
     Private Sub UserBarClick(sender As Object, e As MouseEventArgs)
         ' Mica toggle area
@@ -1134,8 +1182,14 @@ Public Class frmStart
                                                   Try : Process.Start("shutdown", "/r /t 0") : Catch : End Try
                                               End Sub)
             cm.Items.Add("Sign out", Nothing, Sub(s, ev)
-                                                   Try : Process.Start("logoff") : Catch : End Try
-                                               End Sub)
+                                                  Try : Process.Start("logoff") : Catch : End Try
+                                              End Sub)
+            cm.Items.Add("-", Nothing, Sub(s, ev)
+                                           Try : Catch : End Try
+                                       End Sub)
+
+            cm.Items.Add("Exit Rice", Nothing, Sub(s, ev) Application.Exit())
+
             cm.Show(pnlUserBar, e.Location)
         End If
     End Sub
