@@ -82,6 +82,10 @@ Public Class Form1
         winEventHook1 = SetWinEventHook(EVENT_OBJECT_CREATE, EVENT_OBJECT_DESTROY, IntPtr.Zero, winEventCallback, 0, 0, WINEVENT_OUTOFCONTEXT)
         winEventHook2 = SetWinEventHook(EVENT_OBJECT_SHOW, EVENT_OBJECT_HIDE, IntPtr.Zero, winEventCallback, 0, 0, WINEVENT_OUTOFCONTEXT)
 
+        ''brad code, trying to make frmStart faster to open by preloading it in the background
+        ' calling .update() as how for some reason .load() does not seem to exist any more?
+        frmStart.Update()
+
     End Sub
 
     Protected Overrides Sub OnLoad(e As EventArgs)
