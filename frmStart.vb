@@ -154,6 +154,14 @@ Public Class frmStart
     Private catScrollOffsets As New Dictionary(Of String, Integer)(StringComparer.OrdinalIgnoreCase)
     Private Const CAT_MAX_EXPANDED_ROWS As Integer = 3  ' max visible rows when expanded before scrolling
 
+    ' Drag and drop state
+    Private dragStartPoint As Point = Point.Empty
+    Private isDragging As Boolean = False
+    Private dragDropTargetCat As String = Nothing  ' highlighted category during drag-over
+    Private dragDropNewTarget As Boolean = False    ' hovering over "new category" drop zone
+    Private dragSourceCat As String = Nothing       ' category the dragged item came from
+    Private catDragStartPoint As Point = Point.Empty
+
     ' Layout constants
     Private Const FORM_WIDTH As Integer = 860
     Private Const FORM_HEIGHT As Integer = 640
@@ -339,6 +347,7 @@ Public Class frmStart
         }
         AddHandler pnlAllApps.Paint, AddressOf PaintAllApps
         AddHandler pnlAllApps.MouseClick, AddressOf AllAppsClick
+        AddHandler pnlAllApps.MouseDown, AddressOf AllAppsMouseDown
         AddHandler pnlAllApps.MouseMove, AddressOf AllAppsMouseMove
         AddHandler pnlAllApps.MouseLeave, AddressOf AllAppsMouseLeave
         AddHandler pnlAllApps.MouseWheel, AddressOf AllAppsWheel
@@ -366,12 +375,19 @@ Public Class frmStart
         pnlCategories = New Panel() With {
             .Dock = DockStyle.Top,
             .Height = 300,
-            .BackColor = Color.Transparent
+            .BackColor = Color.Transparent,
+            .AllowDrop = True
         }
         AddHandler pnlCategories.Paint, AddressOf PaintCategories
         AddHandler pnlCategories.MouseClick, AddressOf CategoriesClick
+        AddHandler pnlCategories.MouseDown, AddressOf CategoriesMouseDown
         AddHandler pnlCategories.MouseMove, AddressOf CategoriesMouseMove
         AddHandler pnlCategories.MouseLeave, AddressOf CategoriesMouseLeave
+        AddHandler pnlCategories.MouseUp, AddressOf CategoriesRightClick
+        AddHandler pnlCategories.DragEnter, AddressOf CategoriesDragEnter
+        AddHandler pnlCategories.DragOver, AddressOf CategoriesDragOver
+        AddHandler pnlCategories.DragLeave, AddressOf CategoriesDragLeave
+        AddHandler pnlCategories.DragDrop, AddressOf CategoriesDragDrop
         ' Scrolling within expanded categories is handled by click on the scrollbar area
         pnlLeft.Controls.Add(pnlCategories)
 
@@ -836,13 +852,103 @@ Public Class frmStart
 
     Private Sub BuildCategories()
         categories.Clear()
-        ' Group entries that have a category
+
+        ' Load custom categories first (they appear at top)
+        LoadCustomCategories()
+
+        ' Then add auto-categories
         Dim catGroups = allEntries.Where(Function(a) Not String.IsNullOrEmpty(a.Category)).
             GroupBy(Function(a) a.Category).
             OrderBy(Function(g) g.Key).ToList()
 
         For Each cg In catGroups
-            categories.Add((cg.Key, cg.ToList()))
+            ' Don't duplicate if a custom category has the same name
+            If Not customCategoryNames.Contains(cg.Key) Then
+                categories.Add((cg.Key, cg.ToList()))
+            End If
+        Next
+    End Sub
+
+    Private Sub LoadCustomCategories()
+        ' Format: "CatName:key1,key2,key3|CatName2:key4,key5"
+        Try
+            Dim saved = My.Settings.CustomCategories
+            If String.IsNullOrEmpty(saved) Then Return
+            For Each catBlock In saved.Split("|"c)
+                If String.IsNullOrEmpty(catBlock) Then Continue For
+                Dim colonIdx = catBlock.IndexOf(":"c)
+                If colonIdx < 0 Then Continue For
+                Dim catName = catBlock.Substring(0, colonIdx)
+                Dim keysStr = catBlock.Substring(colonIdx + 1)
+                customCategoryNames.Add(catName)
+
+                Dim entries As New List(Of AppEntry)()
+                If Not String.IsNullOrEmpty(keysStr) Then
+                    For Each key In keysStr.Split(","c)
+                        If String.IsNullOrEmpty(key) Then Continue For
+                        Dim entry = allEntries.FirstOrDefault(Function(a) String.Equals(a.Key, key, StringComparison.OrdinalIgnoreCase))
+                        If entry IsNot Nothing Then entries.Add(entry)
+                    Next
+                End If
+                categories.Add((catName, entries))
+            Next
+        Catch
+        End Try
+    End Sub
+
+    Private Sub SaveCustomCategories()
+        Try
+            Dim parts As New List(Of String)()
+            For Each cat In categories
+                If Not customCategoryNames.Contains(cat.Name) Then Continue For
+                Dim keys = String.Join(",", cat.Entries.Select(Function(e) e.Key))
+                parts.Add(cat.Name & ":" & keys)
+            Next
+            My.Settings.CustomCategories = String.Join("|", parts)
+            My.Settings.Save()
+        Catch
+        End Try
+    End Sub
+
+    Private Sub AddAppToCustomCategory(catName As String, entry As AppEntry)
+        For i = 0 To categories.Count - 1
+            If String.Equals(categories(i).Name, catName, StringComparison.OrdinalIgnoreCase) Then
+                If Not categories(i).Entries.Any(Function(e) e.Key = entry.Key) Then
+                    categories(i).Entries.Add(entry)
+                    SaveCustomCategories()
+                    pnlCategories.Invalidate()
+                End If
+                Return
+            End If
+        Next
+    End Sub
+
+    Private Sub CreateCustomCategory(name As String)
+        If String.IsNullOrEmpty(name) Then Return
+        If customCategoryNames.Contains(name) Then Return
+        customCategoryNames.Add(name)
+        ' Insert at position 0 so custom categories stay at top
+        categories.Insert(0, (name, New List(Of AppEntry)()))
+        SaveCustomCategories()
+        pnlCategories.Invalidate()
+    End Sub
+
+    Private Sub RemoveCustomCategory(catName As String)
+        If Not customCategoryNames.Contains(catName) Then Return
+        customCategoryNames.Remove(catName)
+        categories.RemoveAll(Function(c) String.Equals(c.Name, catName, StringComparison.OrdinalIgnoreCase))
+        SaveCustomCategories()
+        pnlCategories.Invalidate()
+    End Sub
+
+    Private Sub RemoveAppFromCustomCategory(catName As String, entryKey As String)
+        For i = 0 To categories.Count - 1
+            If String.Equals(categories(i).Name, catName, StringComparison.OrdinalIgnoreCase) Then
+                categories(i).Entries.RemoveAll(Function(e) e.Key = entryKey)
+                SaveCustomCategories()
+                pnlCategories.Invalidate()
+                Return
+            End If
         Next
     End Sub
 
@@ -1022,7 +1128,6 @@ Public Class frmStart
     End Sub
 
     Private Sub PaintCategories(sender As Object, e As PaintEventArgs)
-        If categories.Count = 0 Then Return
         Dim g = e.Graphics
         g.SmoothingMode = SmoothingMode.HighQuality
         g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit
@@ -1033,6 +1138,22 @@ Public Class frmStart
                 g.DrawString("Categories", fnt, br, 4, 4)
             End Using
         End Using
+
+        ' "New category" drop target (visible during drag)
+        If isDragging OrElse dragDropNewTarget Then
+            Dim newZoneRect = New Rectangle(LEFT_CONTENT_W - 80, 2, 76, 26)
+            Dim zoneColor = If(dragDropNewTarget, clrAccent, Color.FromArgb(80, 96, 165, 250))
+            DrawRoundedCard(g, newZoneRect, zoneColor, 6)
+            Using fnt = New Font("Segoe UI", 9, FontStyle.Bold)
+                Using br = New SolidBrush(If(dragDropNewTarget, Color.White, clrTextSecondary))
+                    Using sf = New StringFormat() With {.Alignment = StringAlignment.Center, .LineAlignment = StringAlignment.Center}
+                        g.DrawString("+ New", fnt, br, New RectangleF(newZoneRect.X, newZoneRect.Y, newZoneRect.Width, newZoneRect.Height), sf)
+                    End Using
+                End Using
+            End Using
+        End If
+
+        If categories.Count = 0 Then Return
 
         Dim panelW = LEFT_CONTENT_W
         Dim cols = 3
@@ -1081,9 +1202,23 @@ Public Class frmStart
                 rowMaxBottom = curY
             End If
 
-            ' Draw group border container
+            ' Draw group border container (accent border for custom categories, glow during drag target)
+            Dim isCustom = customCategoryNames.Contains(cat.Name)
+            Dim isDragTarget = (dragDropTargetCat IsNot Nothing AndAlso String.Equals(dragDropTargetCat, cat.Name, StringComparison.OrdinalIgnoreCase))
             Dim groupRect = New Rectangle(curX, curY, groupW, groupH)
-            DrawRoundedBorder(g, groupRect, clrGroupBg, clrGroupBorder, 10)
+            Dim borderClr As Color
+            Dim bgClr As Color
+            If isDragTarget Then
+                borderClr = clrAccent
+                bgClr = Color.FromArgb(60, 96, 165, 250)
+            ElseIf isCustom Then
+                borderClr = clrCustomCatBorder
+                bgClr = clrGroupBg
+            Else
+                borderClr = clrGroupBorder
+                bgClr = clrGroupBg
+            End If
+            DrawRoundedBorder(g, groupRect, bgClr, borderClr, 10)
 
             ' Category header
             Dim isHeaderHov = (hoveredCatHeader = cat.Name)
@@ -1505,6 +1640,7 @@ Public Class frmStart
     End Function
 
     Private Sub CategoriesClick(sender As Object, e As MouseEventArgs)
+        If e.Button <> MouseButtons.Left Then Return
         ' Check if clicking the scrollbar area of an expanded category
         Dim layout = GetCatGroupLayout()
         For Each grp In layout
@@ -1551,25 +1687,62 @@ Public Class frmStart
         If hit.Entry IsNot Nothing Then LaunchEntry(hit.Entry)
     End Sub
 
+    Private Sub CategoriesMouseDown(sender As Object, e As MouseEventArgs)
+        If e.Button = MouseButtons.Left Then
+            catDragStartPoint = e.Location
+        End If
+    End Sub
+
     Private Sub CategoriesMouseMove(sender As Object, e As MouseEventArgs)
-        Dim hit = GetCatEntryAt(e.Location)
+        ' Start drag from a custom category card
+        If e.Button = MouseButtons.Left AndAlso catDragStartPoint <> Point.Empty AndAlso Not isDragging Then
+            Dim dx = Math.Abs(e.X - catDragStartPoint.X)
+            Dim dy = Math.Abs(e.Y - catDragStartPoint.Y)
+            If dx > SystemInformation.DragSize.Width OrElse dy > SystemInformation.DragSize.Height Then
+                Dim hit = GetCatEntryAt(catDragStartPoint)
+                If hit.Entry IsNot Nothing Then
+                    ' Find which category this entry belongs to
+                    Dim layout = GetCatGroupLayout()
+                    Dim catIdx = 0
+                    For Each grp In layout
+                        For Each ent In grp.Entries
+                            If catIdx = hit.Index AndAlso customCategoryNames.Contains(grp.Name) Then
+                                isDragging = True
+                                dragSourceCat = grp.Name
+                                pnlCategories.Invalidate()
+                                pnlCategories.DoDragDrop(hit.Entry, DragDropEffects.Move Or DragDropEffects.Copy)
+                                isDragging = False
+                                dragSourceCat = Nothing
+                                catDragStartPoint = Point.Empty
+                                pnlCategories.Invalidate()
+                                Return
+                            End If
+                            catIdx += 1
+                        Next
+                    Next
+                End If
+                catDragStartPoint = Point.Empty
+            End If
+        End If
+
+        Dim hitMove = GetCatEntryAt(e.Location)
         Dim needRepaint = False
 
-        If hit.Index <> catHoveredIdx Then
-            catHoveredIdx = hit.Index
+        If hitMove.Index <> catHoveredIdx Then
+            catHoveredIdx = hitMove.Index
             needRepaint = True
         End If
 
-        Dim newHeaderHov = hit.HeaderName
+        Dim newHeaderHov = hitMove.HeaderName
         If newHeaderHov <> hoveredCatHeader Then
             hoveredCatHeader = newHeaderHov
             needRepaint = True
         End If
 
         If needRepaint Then pnlCategories.Invalidate()
-        Dim showHand = hit.Index >= 0
-        If hit.HeaderName IsNot Nothing Then
-            Dim cat = categories.FirstOrDefault(Function(c) c.Name = hit.HeaderName)
+        Dim showHand = hitMove.Index >= 0
+        If hitMove.HeaderName IsNot Nothing Then
+            Dim cat = categories.FirstOrDefault(Function(c) c.Name = hitMove.HeaderName)
             If cat.Entries IsNot Nothing AndAlso cat.Entries.Count > 3 Then showHand = True
         End If
         pnlCategories.Cursor = If(showHand, Cursors.Hand, Cursors.Default)
@@ -1580,6 +1753,191 @@ Public Class frmStart
         catHoveredIdx = -1
         hoveredCatHeader = Nothing
         If needRepaint Then pnlCategories.Invalidate()
+    End Sub
+
+    Private Sub CategoriesRightClick(sender As Object, e As MouseEventArgs)
+        If e.Button <> MouseButtons.Right Then Return
+        Dim hit = GetCatEntryAt(e.Location)
+
+        ' Right-click on a custom category header — show rename/delete
+        If hit.HeaderName IsNot Nothing AndAlso customCategoryNames.Contains(hit.HeaderName) Then
+            Dim catName = hit.HeaderName
+            Dim cm = New ContextMenuStrip()
+            cm.Items.Add("Rename category", Nothing, Sub(s, ev)
+                                                          Dim newName = InputBox("New name:", "Rename Category", catName)
+                                                          If Not String.IsNullOrEmpty(newName) AndAlso newName <> catName Then
+                                                              RenameCustomCategory(catName, newName)
+                                                          End If
+                                                      End Sub)
+            cm.Items.Add("Delete category", Nothing, Sub(s, ev)
+                                                          If MessageBox.Show("Delete custom category """ & catName & """?",
+                                                                            "Confirm", MessageBoxButtons.YesNo) = DialogResult.Yes Then
+                                                              RemoveCustomCategory(catName)
+                                                          End If
+                                                      End Sub)
+            cm.Show(pnlCategories, e.Location)
+            Return
+        End If
+
+        ' Right-click on an app card inside a custom category — show remove option
+        If hit.Entry IsNot Nothing Then
+            ' Find which category this entry belongs to by checking the layout
+            Dim layout = GetCatGroupLayout()
+            Dim catIdx = 0
+            For Each grp In layout
+                For Each ent In grp.Entries
+                    If catIdx = hit.Index Then
+                        If customCategoryNames.Contains(grp.Name) Then
+                            Dim grpName = grp.Name
+                            Dim entryKey = hit.Entry.Key
+                            Dim cm = New ContextMenuStrip()
+                            cm.Items.Add("Remove from " & grpName, Nothing, Sub(s, ev)
+                                                                                  RemoveAppFromCustomCategory(grpName, entryKey)
+                                                                              End Sub)
+                            cm.Items.Add("Open", Nothing, Sub(s, ev) LaunchEntry(hit.Entry))
+                            cm.Show(pnlCategories, e.Location)
+                            Return
+                        End If
+                    End If
+                    catIdx += 1
+                Next
+            Next
+        End If
+    End Sub
+
+    Private Sub RenameCustomCategory(oldName As String, newName As String)
+        If Not customCategoryNames.Contains(oldName) Then Return
+        If customCategoryNames.Contains(newName) Then Return
+        customCategoryNames.Remove(oldName)
+        customCategoryNames.Add(newName)
+        For i = 0 To categories.Count - 1
+            If String.Equals(categories(i).Name, oldName, StringComparison.OrdinalIgnoreCase) Then
+                categories(i) = (newName, categories(i).Entries)
+                Exit For
+            End If
+        Next
+        ' Update expanded/scroll state
+        If expandedCategories.Contains(oldName) Then
+            expandedCategories.Remove(oldName)
+            expandedCategories.Add(newName)
+        End If
+        If catScrollOffsets.ContainsKey(oldName) Then
+            catScrollOffsets(newName) = catScrollOffsets(oldName)
+            catScrollOffsets.Remove(oldName)
+        End If
+        SaveCustomCategories()
+        pnlCategories.Invalidate()
+    End Sub
+
+    ' --- Category drag-and-drop handlers ---
+    Private Function GetDropTargetCategory(pt As Point) As String
+        ' Check if hovering over the "+" new category drop zone (beside "Categories" header)
+        ' The "+" zone is a small area to the right of the "Categories" text
+        Dim newZoneRect = New Rectangle(LEFT_CONTENT_W - 80, 0, 76, 30)
+        If newZoneRect.Contains(pt) Then Return "##NEW##"
+
+        ' Check existing custom category groups
+        Dim layout = GetCatGroupLayout()
+        For Each grp In layout
+            If customCategoryNames.Contains(grp.Name) AndAlso grp.Rect.Contains(pt) Then
+                Return grp.Name
+            End If
+        Next
+        Return Nothing
+    End Function
+
+    Private Sub CategoriesDragEnter(sender As Object, e As DragEventArgs)
+        If e.Data.GetDataPresent(GetType(AppEntry)) Then
+            e.Effect = If(dragSourceCat IsNot Nothing, DragDropEffects.Move, DragDropEffects.Copy)
+        Else
+            e.Effect = DragDropEffects.None
+        End If
+    End Sub
+
+    Private Sub CategoriesDragOver(sender As Object, e As DragEventArgs)
+        If Not e.Data.GetDataPresent(GetType(AppEntry)) Then
+            e.Effect = DragDropEffects.None
+            Return
+        End If
+
+        Dim pt = pnlCategories.PointToClient(New Point(e.X, e.Y))
+        Dim target = GetDropTargetCategory(pt)
+
+        Dim dropEffect = If(dragSourceCat IsNot Nothing, DragDropEffects.Move, DragDropEffects.Copy)
+        Dim changed = False
+        If target = "##NEW##" Then
+            If Not dragDropNewTarget Then changed = True
+            dragDropNewTarget = True
+            dragDropTargetCat = Nothing
+            e.Effect = dropEffect
+        ElseIf target IsNot Nothing Then
+            ' Don't allow dropping on the same category
+            If dragSourceCat IsNot Nothing AndAlso String.Equals(target, dragSourceCat, StringComparison.OrdinalIgnoreCase) Then
+                If dragDropTargetCat IsNot Nothing OrElse dragDropNewTarget Then changed = True
+                dragDropTargetCat = Nothing
+                dragDropNewTarget = False
+                e.Effect = DragDropEffects.None
+            Else
+                If dragDropTargetCat <> target OrElse dragDropNewTarget Then changed = True
+                dragDropTargetCat = target
+                dragDropNewTarget = False
+                e.Effect = dropEffect
+            End If
+        Else
+            If dragDropTargetCat IsNot Nothing OrElse dragDropNewTarget Then changed = True
+            dragDropTargetCat = Nothing
+            dragDropNewTarget = False
+            e.Effect = DragDropEffects.None
+        End If
+
+        If changed Then pnlCategories.Invalidate()
+    End Sub
+
+    Private Sub CategoriesDragLeave(sender As Object, e As EventArgs)
+        If dragDropTargetCat IsNot Nothing OrElse dragDropNewTarget Then
+            dragDropTargetCat = Nothing
+            dragDropNewTarget = False
+            pnlCategories.Invalidate()
+        End If
+    End Sub
+
+    Private Sub CategoriesDragDrop(sender As Object, e As DragEventArgs)
+        Dim sourceCat = dragSourceCat  ' capture before reset
+        dragDropTargetCat = Nothing
+        dragDropNewTarget = False
+
+        If Not e.Data.GetDataPresent(GetType(AppEntry)) Then Return
+        Dim entry = DirectCast(e.Data.GetData(GetType(AppEntry)), AppEntry)
+
+        Dim pt = pnlCategories.PointToClient(New Point(e.X, e.Y))
+        Dim target = GetDropTargetCategory(pt)
+
+        ' Don't drop onto the same category it came from
+        If target IsNot Nothing AndAlso target <> "##NEW##" AndAlso
+           sourceCat IsNot Nothing AndAlso String.Equals(target, sourceCat, StringComparison.OrdinalIgnoreCase) Then
+            pnlCategories.Invalidate()
+            Return
+        End If
+
+        If target = "##NEW##" Then
+            Dim name = InputBox("Category name:", "New Custom Category")
+            If Not String.IsNullOrEmpty(name) Then
+                CreateCustomCategory(name)
+                AddAppToCustomCategory(name, entry)
+                ' Remove from source if it was a move between custom categories
+                If sourceCat IsNot Nothing Then
+                    RemoveAppFromCustomCategory(sourceCat, entry.Key)
+                End If
+            End If
+        ElseIf target IsNot Nothing Then
+            AddAppToCustomCategory(target, entry)
+            ' Remove from source if it was a move between custom categories
+            If sourceCat IsNot Nothing Then
+                RemoveAppFromCustomCategory(sourceCat, entry.Key)
+            End If
+        End If
+
+        pnlCategories.Invalidate()
     End Sub
 
     ' --- All Apps mouse handling ---
@@ -1691,6 +2049,12 @@ Public Class frmStart
         Return idx
     End Function
 
+    Private Sub AllAppsMouseDown(sender As Object, e As MouseEventArgs)
+        If e.Button = MouseButtons.Left Then
+            dragStartPoint = e.Location
+        End If
+    End Sub
+
     Private Sub AllAppsMouseMove(sender As Object, e As MouseEventArgs)
         If showLetterGrid Then
             Dim gridIdx = GetLetterGridIndexAt(e.Location)
@@ -1702,12 +2066,30 @@ Public Class frmStart
             Return
         End If
 
-        Dim hit = GetAllAppsEntryAt(e.Location)
-        If hit.Index <> allAppsHoveredIdx Then
-            allAppsHoveredIdx = hit.Index
+        ' Start drag if mouse moved far enough with button held
+        If e.Button = MouseButtons.Left AndAlso dragStartPoint <> Point.Empty AndAlso Not isDragging Then
+            Dim dx = Math.Abs(e.X - dragStartPoint.X)
+            Dim dy = Math.Abs(e.Y - dragStartPoint.Y)
+            If dx > SystemInformation.DragSize.Width OrElse dy > SystemInformation.DragSize.Height Then
+                Dim hit = GetAllAppsEntryAt(dragStartPoint)
+                If hit.Entry IsNot Nothing Then
+                    isDragging = True
+                    pnlCategories.Invalidate()  ' Show the "+ New" drop zone
+                    pnlAllApps.DoDragDrop(hit.Entry, DragDropEffects.Copy)
+                    isDragging = False
+                    dragStartPoint = Point.Empty
+                    pnlCategories.Invalidate()  ' Hide it when done
+                    Return
+                End If
+            End If
+        End If
+
+        Dim hitMove = GetAllAppsEntryAt(e.Location)
+        If hitMove.Index <> allAppsHoveredIdx Then
+            allAppsHoveredIdx = hitMove.Index
             pnlAllApps.Invalidate()
         End If
-        Dim showHand = hit.Index >= 0 OrElse hit.LetterHeader IsNot Nothing
+        Dim showHand = hitMove.Index >= 0 OrElse hitMove.LetterHeader IsNot Nothing
         pnlAllApps.Cursor = If(showHand, Cursors.Hand, Cursors.Default)
     End Sub
 
@@ -1777,6 +2159,33 @@ Public Class frmStart
                                                       End If
                                                   End Sub)
         End If
+
+        ' Add to category submenu
+        Dim catMenu = New ToolStripMenuItem("Add to category")
+        For Each cat In categories
+            If Not customCategoryNames.Contains(cat.Name) Then Continue For
+            Dim catName = cat.Name ' capture for lambda
+            Dim alreadyIn = cat.Entries.Any(Function(en) en.Key = entry.Key)
+            Dim item = catMenu.DropDownItems.Add(catName)
+            If alreadyIn Then
+                item.Enabled = False
+                item.Text = catName & " (already added)"
+            Else
+                AddHandler item.Click, Sub(s, ev) AddAppToCustomCategory(catName, entry)
+            End If
+        Next
+        If catMenu.DropDownItems.Count > 0 Then
+            catMenu.DropDownItems.Add(New ToolStripSeparator())
+        End If
+        catMenu.DropDownItems.Add("New category...", Nothing, Sub(s, ev)
+                                                                   Dim name = InputBox("Category name:", "New Custom Category")
+                                                                   If Not String.IsNullOrEmpty(name) Then
+                                                                       CreateCustomCategory(name)
+                                                                       AddAppToCustomCategory(name, entry)
+                                                                   End If
+                                                               End Sub)
+        cm.Items.Add(catMenu)
+        cm.Items.Add(New ToolStripSeparator())
 
         cm.Items.Add("Open", Nothing, Sub(s, ev) LaunchEntry(entry))
         cm.Items.Add("Open file location", Nothing, Sub(s, ev)
