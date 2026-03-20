@@ -6,7 +6,7 @@ Imports System.Drawing.Drawing2D
 Imports System.Drawing.Imaging
 Imports System.Drawing.Text
 
-
+' search for TrayNotifyWnd to find the system tray? 
 Public Class frmStart
     Inherits Form
 
@@ -1494,6 +1494,7 @@ Public Class frmStart
     End Function
 
     Private Sub AllAppsClick(sender As Object, e As MouseEventArgs)
+        If e.Button <> MouseButtons.Left Then Return
         Dim hit = GetAllAppsEntryAt(e.Location)
         If hit.Entry IsNot Nothing Then LaunchEntry(hit.Entry)
     End Sub
