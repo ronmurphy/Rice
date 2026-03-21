@@ -53,7 +53,7 @@ Partial Class Form1
         flowLeft.Dock = DockStyle.Left
         flowLeft.Location = New Point(0, 0)
         flowLeft.Name = "flowLeft"
-        flowLeft.Padding = New Padding(4, 8, 4, 8)
+        flowLeft.Padding = New Padding(4, 4, 4, 4)
         flowLeft.Size = New Size(300, 48)
         flowLeft.TabIndex = 2
         flowLeft.WrapContents = False
@@ -125,7 +125,7 @@ Partial Class Form1
         panelTray.Dock = DockStyle.Right
         panelTray.Location = New Point(160, 0)
         panelTray.Name = "panelTray"
-        panelTray.Padding = New Padding(4, 8, 4, 8)
+        panelTray.Padding = New Padding(4, 4, 4, 4)
         panelTray.Size = New Size(140, 48)
         panelTray.TabIndex = 0
         panelTray.WrapContents = False

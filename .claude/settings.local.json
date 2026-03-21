@@ -8,7 +8,10 @@
       "Bash(grep -E '\\\\.vb$|\\\\.vbproj$')",
       "Bash(ls -la *.vb)",
       "Bash(start \"\" dotnet run)",
-      "Bash(tasklist)"
+      "Bash(tasklist)",
+      "Bash(start binDebugnet10.0-windowsRice.exe)",
+      "Bash(dir \"C:\\\\Users\\\\Brad\\\\source\\\\repos\\\\Rice\\\\bin\\\\Debug\\\\net10.0-windows\\\\Rice.*\")",
+      "Bash(start \"\" \"C:\\\\Users\\\\Brad\\\\source\\\\repos\\\\Rice\\\\bin\\\\Debug\\\\net10.0-windows\\\\Rice.exe\")"
     ]
   }
 }

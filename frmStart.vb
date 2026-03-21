@@ -60,7 +60,7 @@ Public Class frmStart
     End Function
 
     Private micaApplied As Boolean = False
-    Private micaEnabled As Boolean = False  ' Off by default — user can toggle
+    Private micaEnabled As Boolean = True ' False  ' Off by default — user can toggle
 #End Region
 
 #Region "P/Invoke - Shell icon extraction"
@@ -1764,17 +1764,17 @@ Public Class frmStart
             Dim catName = hit.HeaderName
             Dim cm = New ContextMenuStrip()
             cm.Items.Add("Rename category", Nothing, Sub(s, ev)
-                                                          Dim newName = InputBox("New name:", "Rename Category", catName)
-                                                          If Not String.IsNullOrEmpty(newName) AndAlso newName <> catName Then
-                                                              RenameCustomCategory(catName, newName)
-                                                          End If
-                                                      End Sub)
+                                                         Dim newName = InputBox("New name:", "Rename Category", catName)
+                                                         If Not String.IsNullOrEmpty(newName) AndAlso newName <> catName Then
+                                                             RenameCustomCategory(catName, newName)
+                                                         End If
+                                                     End Sub)
             cm.Items.Add("Delete category", Nothing, Sub(s, ev)
-                                                          If MessageBox.Show("Delete custom category """ & catName & """?",
+                                                         If MessageBox.Show("Delete custom category """ & catName & """?",
                                                                             "Confirm", MessageBoxButtons.YesNo) = DialogResult.Yes Then
-                                                              RemoveCustomCategory(catName)
-                                                          End If
-                                                      End Sub)
+                                                             RemoveCustomCategory(catName)
+                                                         End If
+                                                     End Sub)
             cm.Show(pnlCategories, e.Location)
             Return
         End If
@@ -1792,8 +1792,8 @@ Public Class frmStart
                             Dim entryKey = hit.Entry.Key
                             Dim cm = New ContextMenuStrip()
                             cm.Items.Add("Remove from " & grpName, Nothing, Sub(s, ev)
-                                                                                  RemoveAppFromCustomCategory(grpName, entryKey)
-                                                                              End Sub)
+                                                                                RemoveAppFromCustomCategory(grpName, entryKey)
+                                                                            End Sub)
                             cm.Items.Add("Open", Nothing, Sub(s, ev) LaunchEntry(hit.Entry))
                             cm.Show(pnlCategories, e.Location)
                             Return
@@ -2178,12 +2178,12 @@ Public Class frmStart
             catMenu.DropDownItems.Add(New ToolStripSeparator())
         End If
         catMenu.DropDownItems.Add("New category...", Nothing, Sub(s, ev)
-                                                                   Dim name = InputBox("Category name:", "New Custom Category")
-                                                                   If Not String.IsNullOrEmpty(name) Then
-                                                                       CreateCustomCategory(name)
-                                                                       AddAppToCustomCategory(name, entry)
-                                                                   End If
-                                                               End Sub)
+                                                                  Dim name = InputBox("Category name:", "New Custom Category")
+                                                                  If Not String.IsNullOrEmpty(name) Then
+                                                                      CreateCustomCategory(name)
+                                                                      AddAppToCustomCategory(name, entry)
+                                                                  End If
+                                                              End Sub)
         cm.Items.Add(catMenu)
         cm.Items.Add(New ToolStripSeparator())
 
